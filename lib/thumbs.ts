@@ -3,6 +3,7 @@
 // by the Rust WASM core; videos → first-frame capture.
 
 import { extractThumbnail } from './wasm';
+import { heicToJpeg, isHeicExt } from './heic';
 import type { PhotoRecord, ThumbInfo } from './types';
 
 const MAX_EDGE = 640;
@@ -51,7 +52,7 @@ export function ensureThumb(
 async function generate(rec: PhotoRecord, getFile: (id: string) => Promise<File>): Promise<ThumbInfo | null> {
   try {
     const file = await getFile(rec.id);
-    const info = rec.kind === 'video' ? await videoThumb(file) : await imageThumb(file);
+    const info = rec.kind === 'video' ? await videoThumb(file) : await imageThumb(file, rec);
     if (info) {
       cache.set(rec.id, info);
       return info;
@@ -89,20 +90,33 @@ async function canvasToJpegUrl(canvas: HTMLCanvasElement | OffscreenCanvas): Pro
   return URL.createObjectURL(blob);
 }
 
-async function imageThumb(file: File): Promise<ThumbInfo | null> {
+async function bitmapToThumb(bitmap: ImageBitmap): Promise<ThumbInfo> {
+  const scale = Math.min(1, MAX_EDGE / Math.max(bitmap.width, bitmap.height));
+  const w = Math.max(1, Math.round(bitmap.width * scale));
+  const h = Math.max(1, Math.round(bitmap.height * scale));
+  const { canvas, ctx } = makeCanvas(w, h);
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  bitmap.close();
+  const url = await canvasToJpegUrl(canvas);
+  return { url, w, h };
+}
+
+async function imageThumb(file: File, rec: PhotoRecord): Promise<ThumbInfo | null> {
   if (typeof createImageBitmap === 'function' && file.type !== 'image/svg+xml') {
     try {
-      const bitmap = await createImageBitmap(file);
-      const scale = Math.min(1, MAX_EDGE / Math.max(bitmap.width, bitmap.height));
-      const w = Math.max(1, Math.round(bitmap.width * scale));
-      const h = Math.max(1, Math.round(bitmap.height * scale));
-      const { canvas, ctx } = makeCanvas(w, h);
-      ctx.drawImage(bitmap, 0, 0, w, h);
-      bitmap.close();
-      const url = await canvasToJpegUrl(canvas);
-      return { url, w, h };
+      return await bitmapToThumb(await createImageBitmap(file));
     } catch {
-      // decode failed (e.g. HEIC on non-Safari) — try the embedded preview
+      // native decode failed — HEIC on Chrome/Firefox, or a broken file
+    }
+  }
+
+  // HEIC/HEIF: decode through the libheif vendor bundle, then downscale as usual
+  if (isHeicExt(rec.ext) && typeof createImageBitmap === 'function') {
+    try {
+      const jpg = await heicToJpeg(file);
+      if (jpg) return await bitmapToThumb(await createImageBitmap(jpg));
+    } catch {
+      // fall through to the embedded preview / format tile
     }
   }
 

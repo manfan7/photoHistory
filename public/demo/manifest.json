@@ -123,5 +123,10 @@
   "name": "demo_clip_2023.mp4",
   "mime": "video/mp4",
   "lastModified": 1692126300000
+ },
+ {
+  "name": "demo_iphone.heic",
+  "mime": "image/heic",
+  "lastModified": 1794651354989
  }
 ]

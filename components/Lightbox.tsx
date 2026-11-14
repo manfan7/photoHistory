@@ -1,7 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ensureThumb, peekThumb } from '@/lib/thumbs';
+import { heicToJpeg, isHeicExt } from '@/lib/heic';
 import { formatDateShort, humanSize } from '@/lib/formats';
 import { IconCamera, IconCalendar, IconChevronLeft, IconChevronRight, IconClose, IconChip } from './icons';
 import type { PhotoRecord } from '@/lib/types';
@@ -25,6 +26,8 @@ export default function Lightbox({ records, index, getFile, onClose, onIndexChan
   const [url, setUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
+  const decodedUrlRef = useRef<string | null>(null);
+  const heicTriedRef = useRef<string | null>(null);
 
   const older = useCallback(
     () => onIndexChange(Math.min(records.length - 1, index + 1)),
@@ -45,6 +48,7 @@ export default function Lightbox({ records, index, getFile, onClose, onIndexChan
   useEffect(() => {
     let alive = true;
     let objectUrl: string | null = null;
+    heicTriedRef.current = null;
     setLoading(true);
     setFailed(false);
     setUrl(null);
@@ -76,12 +80,38 @@ export default function Lightbox({ records, index, getFile, onClose, onIndexChan
 
     return () => {
       alive = false;
-      // Only revoke object URLs we created for original files here; thumbnail
-      // URLs are shared with the card grid and managed by the thumb cache.
+      // Only revoke object URLs we created here; thumbnail URLs are shared
+      // with the card grid and managed by the thumb cache.
       if (objectUrl && rec.renderable) URL.revokeObjectURL(objectUrl);
+      if (decodedUrlRef.current) {
+        URL.revokeObjectURL(decodedUrlRef.current);
+        decodedUrlRef.current = null;
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rec.id]);
+
+  // Chrome/Firefox cannot decode HEIC natively: when the <img> fails, decode
+  // the file through the libheif vendor bundle and swap the URL.
+  const handleImgError = useCallback(async () => {
+    if (!rec || !isHeicExt(rec.ext) || heicTriedRef.current === rec.id) {
+      setLoading(false);
+      setFailed(true);
+      return;
+    }
+    heicTriedRef.current = rec.id;
+    try {
+      const file = await getFile(rec.id);
+      const jpg = await heicToJpeg(file);
+      if (!jpg) throw new Error('decode failed');
+      const decoded = URL.createObjectURL(jpg);
+      decodedUrlRef.current = decoded;
+      setUrl(decoded);
+    } catch {
+      setLoading(false);
+      setFailed(true);
+    }
+  }, [rec, getFile]);
 
   if (!rec) return null;
 
@@ -124,10 +154,7 @@ export default function Lightbox({ records, index, getFile, onClose, onIndexChan
               src={url}
               alt={rec.name}
               onLoad={() => setLoading(false)}
-              onError={() => {
-                setLoading(false);
-                setFailed(true);
-              }}
+              onError={() => void handleImgError()}
             />
           ))
         )}

@@ -7,14 +7,17 @@
     "dev": "next dev",
     "build": "next build",
     "wasm": "wasm-pack build wasm --target web --release && node scripts/copy-wasm.mjs",
-    "postinstall": "node -e \"if(!require('fs').existsSync('public/wasm')){console.log('public/wasm missing — run: npm run wasm')};process.exit(0)\""
+    "postinstall": "node -e \"if(!require('fs').existsSync('public/wasm')){console.log('public/wasm missing — run: npm run wasm')};process.exit(0)\"",
+    "tauri": "tauri"
   },
   "dependencies": {
+    "heic2any": "^0.0.4",
     "next": "15.5.4",
     "react": "19.1.0",
     "react-dom": "19.1.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4",
     "@types/node": "^22.15.0",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",

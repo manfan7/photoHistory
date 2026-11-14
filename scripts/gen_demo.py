@@ -166,6 +166,17 @@ def main():
         "lastModified": unix_ms(ts),
     })
 
+    # a real HEIC from the user's archive (copied in manually) — exercises the
+    # libheif decode path; included only if present on disk
+    heic = OUT / "demo_iphone.heic"
+    if heic.exists():
+        mt = heic.stat().st_mtime
+        manifest.append({
+            "name": "demo_iphone.heic",
+            "mime": "image/heic",
+            "lastModified": int(mt * 1000),
+        })
+
     (OUT / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8"
     )
