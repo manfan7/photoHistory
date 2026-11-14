@@ -4,7 +4,7 @@
 //! most RAW formats), QuickTime/MP4 container dates (mov/mp4/m4v/3gp),
 //! camera model and embedded preview thumbnails.
 
-mod mp4;
+pub mod mp4;
 
 use exif::{In, Tag, Value};
 use serde::Serialize;
@@ -62,7 +62,7 @@ fn uint_field(exif: &exif::Exif, tag: Tag, place: In) -> Option<u32> {
     exif.get_field(tag, place)?.value.get_uint(0)
 }
 
-fn exif_meta(data: &[u8]) -> Option<MediaMeta> {
+pub fn exif_meta(data: &[u8]) -> Option<MediaMeta> {
     let exif = exif::Reader::new()
         .read_from_container(&mut Cursor::new(data))
         .ok()?;

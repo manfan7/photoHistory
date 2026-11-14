@@ -20,6 +20,8 @@ export interface PhotoRecord {
   year: number;
   /** 1–12 */
   month: number;
+  /** Absolute path on disk — Tauri mode only, enables native thumbnails */
+  absPath?: string;
 }
 
 export interface ScanState {

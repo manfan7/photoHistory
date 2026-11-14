@@ -5,6 +5,7 @@
 const FAV_KEY = 'favorites';
 const PRINT_KEY = 'printList';
 const PRINT_DIR_KEY = 'printDir';
+const LAST_DIR_KEY = 'lastDirPath';
 
 import { tx } from './cache';
 import type { PrintDirRef } from './desktop';
@@ -39,4 +40,10 @@ export const PRINT_STORE = {
 export const PRINT_DIR_STORE = {
   load: () => kvGet<PrintDirRef>(PRINT_DIR_KEY),
   save: (v: PrintDirRef) => kvPut(PRINT_DIR_KEY, v),
+};
+
+/** Tauri mode: the last scanned absolute folder path (web keeps a handle instead). */
+export const LAST_DIR_PATH_STORE = {
+  load: () => kvGet<string>(LAST_DIR_KEY),
+  save: (v: string) => kvPut(LAST_DIR_KEY, v),
 };

@@ -6,6 +6,7 @@
 //   3. Filesystem modification time as the fallback
 
 import { parseMedia } from './wasm';
+import { tauriAnalyzeFiles, tauriReadFileAsFile, tauriScanFolder } from './desktop';
 import {
   CONTAINER_CAPABLE,
   EXIF_CAPABLE,
@@ -101,6 +102,99 @@ export async function scanFileList(files: File[], cb: ScanCallbacks): Promise<Sc
     rawPath: f.webkitRelativePath || f.name,
   }));
   return analyzeItems(items, cb);
+}
+
+/**
+ * Tauri mode: the folder is scanned and dated natively (rayon, one IPC call),
+ * files are read from disk by path. Falls back to nothing — this branch runs
+ * only inside the desktop shell.
+ */
+export async function scanTauriFolder(dir: string, cb: ScanCallbacks): Promise<ScanResult> {
+  const entries = await tauriScanFolder(dir);
+  cb.onProgress({ phase: 'walk', found: entries.length, processed: 0, skipped: 0, current: '' });
+
+  const cache = await loadMetaCache();
+  const newCacheEntries: [string, CacheEntry][] = [];
+  const analyzed = await tauriAnalyzeFiles(entries.map((e) => e.abs));
+
+  const records: PhotoRecord[] = [];
+  const accessor = new Map<string, () => Promise<File>>();
+  let skipped = 0;
+  const total = entries.length;
+
+  for (let i = 0; i < total; i++) {
+    if (cb.isCancelled()) break;
+    const entry = entries[i];
+    const name = entry.rel.split('/').pop() || entry.rel;
+    const ext = extOf(name);
+    const kind = kindOf(ext, '');
+    if (!kind) {
+      skipped++;
+      continue;
+    }
+
+    const mime =
+      kind === 'image' ? `image/${ext === 'jpg' ? 'jpeg' : ext}` : `video/${ext}`;
+    accessor.set(entry.rel, () => tauriReadFileAsFile(entry.abs, name, mime));
+
+    const key = metaKey({ relPath: entry.rel, size: entry.size, lastModified: entry.mtimeMs });
+    let entryData = cache.get(key) ?? null;
+    if (!entryData) {
+      const a = analyzed[i];
+      let dateISO: string | null = a?.dateTaken ?? null;
+      let dateSource: DateSource = EXIF_CAPABLE.has(ext) ? 'exif' : 'container';
+      const camera = a?.camera ?? null;
+      const hasEmbeddedThumb = (a?.thumbLen ?? 0) > 512;
+      if (!dateISO) {
+        const hint = dateFromName(name) ?? dateFromPath(entry.rel);
+        if (hint) {
+          dateISO = hint;
+          dateSource = 'name';
+        }
+      }
+      if (!dateISO) {
+        dateISO = fmtLocal(new Date(entry.mtimeMs));
+        dateSource = 'fs';
+      }
+      entryData = { v: 2, dateISO, dateSource, camera, hasEmbeddedThumb };
+      newCacheEntries.push([key, entryData]);
+    }
+
+    const renderable = kind === 'image' ? RENDERABLE_IMAGE.has(ext) : RENDERABLE_VIDEO.has(ext);
+    records.push({
+      id: entry.rel,
+      name,
+      ext,
+      relPath: entry.rel,
+      size: entry.size,
+      lastModified: entry.mtimeMs,
+      dateISO: entryData.dateISO,
+      dateSource: entryData.dateSource,
+      camera: entryData.camera,
+      kind,
+      renderable,
+      hasEmbeddedThumb: entryData.hasEmbeddedThumb,
+      year: Number(entryData.dateISO.slice(0, 4)) || 1970,
+      month: Number(entryData.dateISO.slice(5, 7)) || 1,
+      absPath: entry.abs,
+    });
+
+    if (i % 50 === 0) {
+      cb.onProgress({ phase: 'analyze', found: total, processed: i + 1, skipped, current: name });
+    }
+  }
+
+  if (newCacheEntries.length > 0) await saveMetaBatch(newCacheEntries);
+  cb.onProgress({ phase: 'analyze', found: total, processed: total, skipped, current: '' });
+
+  const getFile = async (id: string): Promise<File> => {
+    const getter = accessor.get(id);
+    if (!getter) throw new Error(`unknown file: ${id}`);
+    return getter();
+  };
+
+  records.sort((a, b) => b.dateISO.localeCompare(a.dateISO) || a.name.localeCompare(b.name));
+  return { records, skipped, getFile };
 }
 
 /** Shared analysis loop for both FSA handles and plain File lists. */

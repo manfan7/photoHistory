@@ -1,6 +1,8 @@
 // Desktop (Tauri) bridge. The Tauri shell exposes the global API bundle
-// (withGlobalTauri), so no npm package is needed — commands: pick_print_folder,
-// save_for_print (src-tauri/src/main.rs).
+// (withGlobalTauri), so no npm package is needed — commands live in
+// src-tauri/src/main.rs. In Tauri mode the whole media pipeline (scan →
+// EXIF/container dating → thumbnails) runs natively with rayon threading;
+// every call below has a web fallback in the regular pipeline.
 
 export function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -14,6 +16,57 @@ export async function tauriInvoke<T>(cmd: string, args?: Record<string, unknown>
   const t = (window as unknown as { __TAURI__?: TauriGlobal }).__TAURI__;
   if (!t) throw new Error('Tauri API недоступен');
   return t.core.invoke(cmd, args) as Promise<T>;
+}
+
+export interface DirEntry {
+  rel: string;
+  abs: string;
+  size: number;
+  mtimeMs: number;
+}
+
+export interface Analyzed {
+  dateTaken: string | null;
+  camera: string | null;
+  thumbLen: number;
+}
+
+export interface ThumbIpc {
+  jpegB64: string;
+  w: number;
+  h: number;
+}
+
+export async function tauriPickArchiveFolder(): Promise<string | null> {
+  return tauriInvoke<string | null>('pick_archive_folder');
+}
+
+export async function tauriScanFolder(dir: string): Promise<DirEntry[]> {
+  return tauriInvoke<DirEntry[]>('scan_folder', { dir });
+}
+
+export async function tauriAnalyzeFiles(paths: string[]): Promise<(Analyzed | null)[]> {
+  return tauriInvoke<(Analyzed | null)[]>('analyze_files', { paths });
+}
+
+export async function tauriGenThumbs(paths: string[], maxEdge: number): Promise<(ThumbIpc | null)[]> {
+  return tauriInvoke<(ThumbIpc | null)[]>('gen_thumbs', { paths, maxEdge });
+}
+
+export async function tauriReadFileB64(path: string): Promise<string> {
+  return tauriInvoke<string>('read_file_b64', { path });
+}
+
+export function b64ToBlob(b64: string, mime: string): Blob {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
+export async function tauriReadFileAsFile(path: string, name: string, mime: string): Promise<File> {
+  const b64 = await tauriReadFileB64(path);
+  return new File([b64ToBlob(b64, mime)], name, { type: mime });
 }
 
 function blobToBase64(blob: Blob): Promise<string> {

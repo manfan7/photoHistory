@@ -19,13 +19,16 @@ import {
 import { scanDirectoryHandle, scanFileList, type ScanCallbacks } from '@/lib/scanner';
 import { humanSize, plural } from '@/lib/formats';
 import { clearMetaCache, getSavedHandle, saveHandle } from '@/lib/cache';
-import { FAV_STORE, PRINT_DIR_STORE, PRINT_STORE } from '@/lib/favorites';
+import { FAV_STORE, LAST_DIR_PATH_STORE, PRINT_DIR_STORE, PRINT_STORE } from '@/lib/favorites';
 import {
   describePrintDir,
+  isTauri,
   pickPrintDir,
   saveForPrint,
+  tauriPickArchiveFolder,
   type PrintDirRef,
 } from '@/lib/desktop';
+import { scanTauriFolder } from '@/lib/scanner';
 import { getWasm } from '@/lib/wasm';
 import type { PhotoRecord, ScanState } from '@/lib/types';
 
@@ -58,7 +61,7 @@ export default function Page() {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; rec: PhotoRecord } | null>(null);
 
   const getFileRef = useRef<((id: string) => Promise<File>) | null>(null);
-  const lastSourceRef = useRef<FileSystemDirectoryHandle | File[] | null>(null);
+  const lastSourceRef = useRef<FileSystemDirectoryHandle | File[] | { tauriDir: string } | null>(null);
   const cancelledRef = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -71,8 +74,13 @@ export default function Page() {
   useEffect(() => {
     setSupportsFSA('showDirectoryPicker' in window);
     (async () => {
-      const h = await getSavedHandle();
-      if (h) setRestoredName(h.name);
+      if (isTauri()) {
+        const savedPath = await LAST_DIR_PATH_STORE.load();
+        if (savedPath) setRestoredName(savedPath.split(/[\\/]/).filter(Boolean).pop() || 'Фотоархив');
+      } else {
+        const h = await getSavedHandle();
+        if (h) setRestoredName(h.name);
+      }
       const [favsSaved, printsSaved, dirSaved] = await Promise.all([
         FAV_STORE.load(),
         PRINT_STORE.load(),
@@ -97,7 +105,7 @@ export default function Page() {
   }, []);
 
   const runScan = useCallback(
-    async (source: FileSystemDirectoryHandle | File[], name: string) => {
+    async (source: FileSystemDirectoryHandle | File[] | { tauriDir: string }, name: string) => {
       cancelledRef.current = false;
       lastSourceRef.current = source;
       setViewerIndex(null);
@@ -111,10 +119,14 @@ export default function Page() {
       };
 
       try {
-        const result =
-          source instanceof Array
-            ? await scanFileList(source, cb)
-            : await scanDirectoryHandle(source, cb);
+        let result;
+        if (!(source instanceof Array) && 'tauriDir' in source) {
+          result = await scanTauriFolder(source.tauriDir, cb);
+        } else if (source instanceof Array) {
+          result = await scanFileList(source, cb);
+        } else {
+          result = await scanDirectoryHandle(source, cb);
+        }
         getFileRef.current = result.getFile;
         setRecords(result.records);
         setSkippedCount(result.skipped);
@@ -135,6 +147,16 @@ export default function Page() {
   );
 
   const pickFolder = useCallback(async () => {
+    if (isTauri()) {
+      // native dialog + fully native rayon pipeline
+      const dir = await tauriPickArchiveFolder();
+      if (!dir) return;
+      const name = dir.split(/[\\/]/).filter(Boolean).pop() || 'Фотоархив';
+      void LAST_DIR_PATH_STORE.save(dir);
+      setRestoredName(name);
+      await runScan({ tauriDir: dir }, name);
+      return;
+    }
     if (!('showDirectoryPicker' in window)) {
       inputRef.current?.click();
       return;
@@ -183,6 +205,13 @@ export default function Page() {
   }, [runScan, showToast]);
 
   const openRestored = useCallback(async () => {
+    if (isTauri()) {
+      const saved = await LAST_DIR_PATH_STORE.load();
+      if (!saved) return;
+      const name = saved.split(/[\\/]/).filter(Boolean).pop() || 'Фотоархив';
+      await runScan({ tauriDir: saved }, name);
+      return;
+    }
     const h = await getSavedHandle();
     if (!h) return;
     type PermHandle = FileSystemDirectoryHandle & {
@@ -210,6 +239,7 @@ export default function Page() {
   const rescan = useCallback(() => {
     const src = lastSourceRef.current;
     if (src instanceof Array) void runScan(src, folderName ?? 'Папка');
+    else if (src && 'tauriDir' in src) void runScan(src, folderName ?? src.tauriDir.split(/[\\/]/).filter(Boolean).pop() ?? 'Папка');
     else if (src) void runScan(src, folderName ?? src.name);
   }, [runScan, folderName]);
 
