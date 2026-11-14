@@ -6,7 +6,7 @@
 //   3. Filesystem modification time as the fallback
 
 import { parseMedia } from './wasm';
-import { tauriAnalyzeFiles, tauriReadFileAsFile, tauriScanFolder } from './desktop';
+import { tauriAnalyzeFiles, tauriReadFileAsFile, tauriScanFolder, type Analyzed } from './desktop';
 import {
   CONTAINER_CAPABLE,
   EXIF_CAPABLE,
@@ -111,16 +111,33 @@ export async function scanFileList(files: File[], cb: ScanCallbacks): Promise<Sc
  */
 export async function scanTauriFolder(dir: string, cb: ScanCallbacks): Promise<ScanResult> {
   const entries = await tauriScanFolder(dir);
-  cb.onProgress({ phase: 'walk', found: entries.length, processed: 0, skipped: 0, current: '' });
+  const total = entries.length;
+  cb.onProgress({ phase: 'walk', found: total, processed: 0, skipped: 0, current: '' });
 
   const cache = await loadMetaCache();
   const newCacheEntries: [string, CacheEntry][] = [];
-  const analyzed = await tauriAnalyzeFiles(entries.map((e) => e.abs));
+
+  // analyze in chunks so the progress ring moves and cancellation works —
+  // the native side parallelizes each batch across all cores (rayon)
+  const analyzed: (Analyzed | null)[] = new Array(total).fill(null);
+  const CHUNK = 150;
+  for (let s = 0; s < total; s += CHUNK) {
+    if (cb.isCancelled()) break;
+    const slice = entries.slice(s, s + CHUNK).map((e) => e.abs);
+    const part = await tauriAnalyzeFiles(slice);
+    for (let j = 0; j < part.length; j++) analyzed[s + j] = part[j] ?? null;
+    cb.onProgress({
+      phase: 'analyze',
+      found: total,
+      processed: Math.min(s + CHUNK, total),
+      skipped: 0,
+      current: '',
+    });
+  }
 
   const records: PhotoRecord[] = [];
   const accessor = new Map<string, () => Promise<File>>();
   let skipped = 0;
-  const total = entries.length;
 
   for (let i = 0; i < total; i++) {
     if (cb.isCancelled()) break;

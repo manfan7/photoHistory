@@ -34,7 +34,7 @@ fn get_print_folder(state: State<PrintDir>) -> Option<String> {
 }
 
 #[tauri::command]
-fn save_for_print(dir: String, name: String, data_b64: String) -> Result<String, String> {
+async fn save_for_print(dir: String, name: String, data_b64: String) -> Result<String, String> {
     let data = base64::engine::general_purpose::STANDARD
         .decode(data_b64)
         .map_err(|e| format!("bad payload: {e}"))?;
@@ -185,6 +185,22 @@ fn collect_media(root: &Path, rel_prefix: &str, out: &mut Vec<DirEntryOut>, dept
 }
 
 #[tauri::command]
+async fn analyze_files(paths: Vec<String>) -> Vec<Option<Analyzed>> {
+    tauri::async_runtime::spawn_blocking(move || analyze_files_impl(paths))
+        .await
+        .map_err(|e| format!("join error: {e}"))
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+async fn gen_thumbs(paths: Vec<String>, max_edge: u32) -> Vec<Option<ThumbOut>> {
+    tauri::async_runtime::spawn_blocking(move || gen_thumbs_impl(paths, max_edge))
+        .await
+        .map_err(|e| format!("join error: {e}"))
+        .unwrap_or_default()
+}
+
+#[tauri::command]
 fn pick_archive_folder(state: State<ArchiveDir>) -> Option<String> {
     let dir = rfd::FileDialog::new()
         .set_title("Папка с фотографиями")
@@ -195,7 +211,7 @@ fn pick_archive_folder(state: State<ArchiveDir>) -> Option<String> {
 }
 
 #[tauri::command]
-fn scan_folder(dir: String) -> Result<Vec<DirEntryOut>, String> {
+async fn scan_folder(dir: String) -> Result<Vec<DirEntryOut>, String> {
     let root = PathBuf::from(&dir);
     if !root.is_dir() {
         return Err("Папка не найдена".to_string());
@@ -213,10 +229,25 @@ pub struct Analyzed {
 }
 
 /// EXIF + QuickTime container dating for one file, mirroring the JS
-/// escalation order (head 2 MB → full ≤64 MB → tail).
+/// escalation order (head 2 MB → full ≤64 MB → tail). Metadata-less formats
+/// (PNG screenshots, stripped messengers images) never trigger full reads —
+/// only containers that can actually carry a date do.
 fn analyze_one_real(path: &Path, ext: &str) -> Option<Analyzed> {
     const HEAD: u64 = 2 * 1024 * 1024;
     const MAX_FULL: u64 = 64 * 1024 * 1024;
+    const EXIF_CAPABLE: &[&str] = &[
+        "jpg", "jpeg", "jpe", "jfif", "tif", "tiff", "cr2", "nef", "nrw", "arw", "srf", "sr2",
+        "dng", "raf", "orf", "rw2", "pef", "ptx", "srw", "x3f", "erf", "kdc", "dcr", "mos",
+        "mef", "3fr", "fff", "iiq", "rwl", "gpr", "mrw",
+    ];
+    const CONTAINER_CAPABLE: &[&str] = &["mp4", "m4v", "m4p", "mov", "3gp", "3g2", "qt"];
+
+    let exif_cap = EXIF_CAPABLE.contains(&ext);
+    let container_cap = CONTAINER_CAPABLE.contains(&ext);
+    if !exif_cap && !container_cap {
+        // nothing to parse (PNG, webp, mkv…) — zero reads, instant
+        return None;
+    }
     let size = std::fs::metadata(path).ok()?.len();
 
     let read_slice = |start: u64, len: u64| -> Option<Vec<u8>> {
@@ -235,13 +266,14 @@ fn analyze_one_real(path: &Path, ext: &str) -> Option<Analyzed> {
     let mut parsed = |bytes: &[u8]| -> Option<photo_history_wasm::MediaMeta> {
         match photo_history_wasm::exif_meta(bytes) {
             Some(m) => Some(m),
-            None => photo_history_wasm::mp4::mp4_creation_date(bytes).map(|d| {
+            None if container_cap => photo_history_wasm::mp4::mp4_creation_date(bytes).map(|d| {
                 photo_history_wasm::MediaMeta {
                     date_taken: Some(d),
                     camera: None,
                     thumb_len: 0,
                 }
             }),
+            _ => None,
         }
     };
 
@@ -253,7 +285,9 @@ fn analyze_one_real(path: &Path, ext: &str) -> Option<Analyzed> {
         }
     }
     if date.is_none() && size > HEAD {
-        if size <= MAX_FULL {
+        // full read only for formats whose metadata can live deeper in the
+        // file (RAW TIFF structures); containers (mp4/mov) use the tail
+        if exif_cap && size <= MAX_FULL {
             if let Ok(full) = std::fs::read(path) {
                 if let Some(m) = parsed(&full) {
                     date = m.date_taken;
@@ -261,9 +295,11 @@ fn analyze_one_real(path: &Path, ext: &str) -> Option<Analyzed> {
                     thumb_len = if m.thumb_len > 0 { m.thumb_len } else { thumb_len };
                 }
             }
-        } else if let Some(bytes) = read_slice(size.saturating_sub(HEAD), HEAD) {
-            if let Some(m) = parsed(&bytes) {
-                date = m.date_taken;
+        } else if container_cap {
+            if let Some(bytes) = read_slice(size.saturating_sub(HEAD), HEAD) {
+                if let Some(m) = parsed(&bytes) {
+                    date = m.date_taken;
+                }
             }
         }
     }
@@ -279,7 +315,7 @@ fn analyze_one_real(path: &Path, ext: &str) -> Option<Analyzed> {
 }
 
 #[tauri::command]
-fn analyze_files(paths: Vec<String>) -> Vec<Option<Analyzed>> {
+fn analyze_files_impl(paths: Vec<String>) -> Vec<Option<Analyzed>> {
     paths
         .par_iter()
         .map(|p| {
@@ -326,7 +362,7 @@ fn gen_thumb_one(path: &Path, max_edge: u32) -> Option<ThumbOut> {
 
 /// Thumbnails for a batch of files — rayon parallel decode+resize.
 #[tauri::command]
-fn gen_thumbs(paths: Vec<String>, max_edge: u32) -> Vec<Option<ThumbOut>> {
+fn gen_thumbs_impl(paths: Vec<String>, max_edge: u32) -> Vec<Option<ThumbOut>> {
     paths
         .par_iter()
         .map(|p| gen_thumb_one(Path::new(p), max_edge))
@@ -334,7 +370,7 @@ fn gen_thumbs(paths: Vec<String>, max_edge: u32) -> Vec<Option<ThumbOut>> {
 }
 
 #[tauri::command]
-fn read_file_b64(path: String) -> Result<String, String> {
+async fn read_file_b64(path: String) -> Result<String, String> {
     let data = std::fs::read(path).map_err(|e| format!("read failed: {e}"))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(data))
 }
@@ -445,13 +481,13 @@ mod tests {
         }
         let paths: Vec<String> = jpgs.iter().map(|p| p.to_string_lossy().to_string()).collect();
         let t0 = std::time::Instant::now();
-        let res = analyze_files(paths.clone());
+        let res = analyze_files_impl(paths.clone());
         let analyze_ms = t0.elapsed().as_millis();
         let dated = res.iter().flatten().filter(|a| a.date_taken.is_some()).count();
         println!("bench analyze_files: {} files, {analyze_ms} ms, {dated} dated", paths.len());
 
         let t1 = std::time::Instant::now();
-        let thumbs = gen_thumbs(paths.clone(), 560);
+        let thumbs = gen_thumbs_impl(paths.clone(), 560);
         let thumb_ms = t1.elapsed().as_millis();
         let ok = thumbs.iter().flatten().count();
         println!("bench gen_thumbs: {} thumbs, {thumb_ms} ms, {ok} ok", paths.len());
@@ -478,9 +514,9 @@ mod bench2 {
             .collect();
         let paths: Vec<String> = jpgs.iter().map(|p| p.to_string_lossy().to_string()).collect();
         // warm-up
-        let _ = gen_thumbs(paths.clone(), 560);
+        let _ = gen_thumbs_impl(paths.clone(), 560);
         let t0 = std::time::Instant::now();
-        let thumbs = gen_thumbs(paths.clone(), 560);
+        let thumbs = gen_thumbs_impl(paths.clone(), 560);
         println!(
             "WARM gen_thumbs: {} thumbs in {} ms ({:.1} ms/thumb effective, {} cores)",
             thumbs.iter().flatten().count(),
