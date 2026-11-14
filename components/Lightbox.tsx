@@ -5,7 +5,7 @@ import { ensureThumb, peekThumb } from '@/lib/thumbs';
 import { heicToJpeg, isHeicExt } from '@/lib/heic';
 import { formatDateShort, humanSize } from '@/lib/formats';
 import { IconCamera, IconCalendar, IconChevronLeft, IconChevronRight, IconClose, IconChip } from './icons';
-import type { PhotoRecord } from '@/lib/types';
+import type { PhotoRecord, ThumbInfo } from '@/lib/types';
 
 interface Props {
   records: PhotoRecord[];
@@ -23,11 +23,15 @@ const SOURCE_LABEL: Record<string, string> = {
 
 export default function Lightbox({ records, index, getFile, onClose, onIndexChange }: Props) {
   const rec = records[index];
-  const [url, setUrl] = useState<string | null>(null);
+  const [fullUrl, setFullUrl] = useState<string | null>(null);
+  const [fullReady, setFullReady] = useState(false);
+  const [fallbackThumb, setFallbackThumb] = useState<ThumbInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   const decodedUrlRef = useRef<string | null>(null);
   const heicTriedRef = useRef<string | null>(null);
+
+  const thumbUrl = rec ? peekThumb(rec.id)?.url ?? null : null;
 
   const older = useCallback(
     () => onIndexChange(Math.min(records.length - 1, index + 1)),
@@ -49,27 +53,30 @@ export default function Lightbox({ records, index, getFile, onClose, onIndexChan
     let alive = true;
     let objectUrl: string | null = null;
     heicTriedRef.current = null;
-    setLoading(true);
+    setFullUrl(null);
+    setFullReady(false);
+    setFallbackThumb(null);
     setFailed(false);
-    setUrl(null);
+    setLoading(true);
 
     (async () => {
       try {
         if (rec.renderable) {
+          // thumb (already in cache) renders instantly; the original decodes on top
           const file = await getFile(rec.id);
           if (!alive) return;
           objectUrl = URL.createObjectURL(file);
+          setFullUrl(objectUrl);
+          setLoading(false);
         } else {
           const thumb = peekThumb(rec.id) ?? (await ensureThumb(rec, getFile));
           if (!alive) return;
           if (!thumb) {
             setFailed(true);
-            setLoading(false);
-            return;
           }
-          objectUrl = thumb.url;
+          setFallbackThumb(thumb);
+          setLoading(false);
         }
-        setUrl(objectUrl);
       } catch {
         if (alive) {
           setFailed(true);
@@ -80,8 +87,8 @@ export default function Lightbox({ records, index, getFile, onClose, onIndexChan
 
     return () => {
       alive = false;
-      // Only revoke object URLs we created here; thumbnail URLs are shared
-      // with the card grid and managed by the thumb cache.
+      // Only revoke URLs created here; thumbnail URLs are shared with the
+      // card grid and owned by the thumb cache.
       if (objectUrl && rec.renderable) URL.revokeObjectURL(objectUrl);
       if (decodedUrlRef.current) {
         URL.revokeObjectURL(decodedUrlRef.current);
@@ -95,7 +102,7 @@ export default function Lightbox({ records, index, getFile, onClose, onIndexChan
   // the file through the libheif vendor bundle and swap the URL.
   const handleImgError = useCallback(async () => {
     if (!rec || !isHeicExt(rec.ext) || heicTriedRef.current === rec.id) {
-      setLoading(false);
+      setFullReady(false);
       setFailed(true);
       return;
     }
@@ -106,9 +113,8 @@ export default function Lightbox({ records, index, getFile, onClose, onIndexChan
       if (!jpg) throw new Error('decode failed');
       const decoded = URL.createObjectURL(jpg);
       decodedUrlRef.current = decoded;
-      setUrl(decoded);
+      setFullUrl(decoded);
     } catch {
-      setLoading(false);
       setFailed(true);
     }
   }, [rec, getFile]);
@@ -125,7 +131,8 @@ export default function Lightbox({ records, index, getFile, onClose, onIndexChan
       aria-label={rec.name}
     >
       <div className="lb-img-area">
-        {loading && !failed && <div className="lb-spinner" />}
+        {loading && !thumbUrl && !fallbackThumb && <div className="lb-spinner" />}
+
         {failed ? (
           <div className="about-card glass glass-strong" style={{ textAlign: 'center', margin: 0 }}>
             <div className="about-title">
@@ -136,28 +143,35 @@ export default function Lightbox({ records, index, getFile, onClose, onIndexChan
               Файл найден и включён в архив — его дату и камеру вы видите ниже.
             </p>
           </div>
-        ) : (
-          url &&
-          (rec.kind === 'video' ? (
-            <video
-              key={url}
-              className="lb-video"
-              src={url}
-              controls
-              autoPlay
-              onLoadedData={() => setLoading(false)}
-            />
-          ) : (
-            <img
-              key={url}
-              className="lb-img"
-              src={url}
-              alt={rec.name}
-              onLoad={() => setLoading(false)}
-              onError={() => void handleImgError()}
-            />
-          ))
-        )}
+        ) : rec.renderable ? (
+          <>
+            {thumbUrl && !fullReady && (
+              <img className="lb-thumb" src={thumbUrl} alt="" draggable={false} />
+            )}
+            {fullUrl &&
+              (rec.kind === 'video' ? (
+                <video
+                  key={fullUrl}
+                  className={`lb-video${fullReady ? ' ready' : ''}`}
+                  src={fullUrl}
+                  controls
+                  autoPlay
+                  onLoadedData={() => setFullReady(true)}
+                />
+              ) : (
+                <img
+                  key={fullUrl}
+                  className={`lb-img${fullReady ? ' ready' : ''}`}
+                  src={fullUrl}
+                  alt={rec.name}
+                  onLoad={() => setFullReady(true)}
+                  onError={() => void handleImgError()}
+                />
+              ))}
+          </>
+        ) : fallbackThumb ? (
+          <img className="lb-img ready" src={fallbackThumb.url} alt={rec.name} draggable={false} />
+        ) : null}
       </div>
 
       <div className="lb-top glass glass-strong">

@@ -8,6 +8,7 @@
 import json
 import random
 import struct
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,6 +17,12 @@ from PIL import Image, ImageDraw, ImageFilter
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "public" / "demo"
 OUT.mkdir(parents=True, exist_ok=True)
+
+# --stress N: additionally generate N small files for local scale testing
+# (they live in demo/stress/ which is gitignored — never committed)
+STRESS = 0
+if len(sys.argv) >= 3 and sys.argv[1] == "--stress":
+    STRESS = int(sys.argv[2])
 
 random.seed(42)
 
@@ -176,6 +183,25 @@ def main():
             "mime": "image/heic",
             "lastModified": int(mt * 1000),
         })
+
+    if STRESS > 0:
+        stress_dir = OUT / "stress"
+        stress_dir.mkdir(exist_ok=True)
+        rng2 = random.Random(99)
+        for i in range(STRESS):
+            yy = 2016 + (i % 11)
+            mm = 1 + (i // 11) % 12
+            im = hsl_image(480, 360, HUE_BASES[i % len(HUE_BASES)], sat=0.4)
+            im = decorate(im, rng2, HUE_BASES[i % len(HUE_BASES)])
+            im = im.resize((240, 180))
+            name = f"stress_{i:05d}.jpg"
+            im.save(stress_dir / name, "JPEG", quality=70)
+            dt = datetime(yy, mm, 1 + (i % 28), (i * 7) % 24, (i * 13) % 60)
+            manifest.append({
+                "name": f"stress/{name}",
+                "mime": "image/jpeg",
+                "lastModified": unix_ms(dt),
+            })
 
     (OUT / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8"

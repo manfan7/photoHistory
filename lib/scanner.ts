@@ -21,7 +21,8 @@ import type { DateSource, PhotoRecord, ScanResult, ScanState } from './types';
 const HEAD_BYTES = 2 * 1024 * 1024; // metadata almost always lives in the first 2 MB
 const MAX_FULL_READ = 64 * 1024 * 1024; // above this, use head + tail slices only
 const TAIL_BYTES = 2 * 1024 * 1024; // the mp4 moov box is often at the end
-const YIELD_EVERY = 8; // files between UI yields
+const PARALLEL_ANALYZE = 6; // metadata reads are IO-bound — a small pool is 4-6x faster
+const YIELD_EVERY = 20; // analyzed files between UI yields
 
 export interface ScanCallbacks {
   onProgress: (state: ScanState) => void;
@@ -104,35 +105,51 @@ async function analyzeItems(items: WalkItem[], cb: ScanCallbacks): Promise<ScanR
   const cache = await loadMetaCache();
   const newCacheEntries: [string, CacheEntry][] = [];
 
-  const records: PhotoRecord[] = [];
+  const total = items.length;
+  const results: (PhotoRecord | null)[] = new Array(total).fill(null);
   const accessor = new Map<string, () => Promise<File>>();
   let skipped = 0;
-  const total = items.length;
+  let nextIdx = 0;
+  let done = 0;
+  let currentName = '';
 
-  for (let i = 0; i < total; i++) {
-    if (cb.isCancelled()) break;
-    const item = items[i];
-    let file: File;
-    try {
-      file = await item.getFile();
-    } catch {
-      skipped++;
-      continue;
+  const worker = async (): Promise<void> => {
+    while (!cb.isCancelled()) {
+      const i = nextIdx++;
+      if (i >= total) return;
+      const item = items[i];
+      const relPath = stripRoot(item.rawPath);
+      accessor.set(relPath, item.getFile);
+
+      let file: File | null = null;
+      try {
+        file = await item.getFile();
+      } catch {
+        /* unreadable file */
+      }
+
+      let rec: PhotoRecord | null = null;
+      if (file) {
+        currentName = file.name;
+        rec = await analyzeFile(file, relPath, cache, newCacheEntries);
+      }
+      if (!rec) skipped++;
+      results[i] = rec;
+
+      done++;
+      if (done % YIELD_EVERY === 0) {
+        cb.onProgress({ phase: 'analyze', found: total, processed: done, skipped, current: currentName });
+        await sleep();
+      }
     }
+  };
 
-    // strip the picked folder prefix so the archive shows content, not the root name
-    const relPath = stripRoot(item.rawPath);
-    accessor.set(relPath, item.getFile);
-
-    const rec = await analyzeFile(file, relPath, cache, newCacheEntries);
-    if (rec) records.push(rec);
-    else skipped++;
-
-    cb.onProgress({ phase: 'analyze', found: total, processed: i + 1, skipped, current: file.name });
-    if (i % YIELD_EVERY === YIELD_EVERY - 1) await sleep();
-  }
+  await Promise.all(Array.from({ length: Math.min(PARALLEL_ANALYZE, total) }, worker));
 
   if (newCacheEntries.length > 0) await saveMetaBatch(newCacheEntries);
+
+  const records = results.filter((r): r is PhotoRecord => r !== null);
+  records.sort((a, b) => b.dateISO.localeCompare(a.dateISO) || a.name.localeCompare(b.name));
 
   const getFile = async (id: string): Promise<File> => {
     const getter = accessor.get(id);
@@ -140,7 +157,6 @@ async function analyzeItems(items: WalkItem[], cb: ScanCallbacks): Promise<ScanR
     return getter();
   };
 
-  records.sort((a, b) => b.dateISO.localeCompare(a.dateISO) || a.name.localeCompare(b.name));
   return { records, skipped, getFile };
 }
 

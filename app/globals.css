@@ -673,64 +673,94 @@ body {
   white-space: nowrap;
 }
 
-/* ── Masonry grid & cards ──────────────────────────────────────── */
+/* ── Virtualized photo grid ────────────────────────────────────── */
 
-.masonry {
-  columns: var(--cols, 4);
-  column-gap: 14px;
+.vgrid {
+  position: relative;
 }
 
-.masonry > * {
-  break-inside: avoid;
-  margin-bottom: 14px;
+.vrow {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: grid;
 }
 
-.card {
+.vmonth {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.vmonth-label {
+  font-size: 13.5px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.vmonth-count {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+
+.vmonth-line {
+  flex: 1;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.vcell {
   position: relative;
   display: block;
   width: 100%;
+  aspect-ratio: 1 / 1;
   padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: var(--radius-md);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 14px;
   overflow: hidden;
   cursor: pointer;
-  background: rgba(255, 255, 255, 0.05);
-  box-shadow: 0 8px 26px rgba(3, 6, 18, 0.35);
-  transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.3, 1), box-shadow 0.22s ease, border-color 0.22s ease;
+  background: rgba(255, 255, 255, 0.045);
+  transition: transform 0.2s cubic-bezier(0.2, 0.8, 0.3, 1), border-color 0.2s ease, box-shadow 0.2s ease;
   -webkit-tap-highlight-color: transparent;
 }
 
-.card:hover {
-  transform: translateY(-3px) scale(1.012);
+.vcell:hover {
+  transform: translateY(-2px) scale(1.02);
   border-color: var(--glass-border-strong);
-  box-shadow: 0 18px 44px rgba(3, 6, 18, 0.55);
+  box-shadow: 0 14px 34px rgba(6, 2, 14, 0.5);
   z-index: 2;
 }
 
-.card:hover .card-sheen {
+.vcell:hover .card-sheen {
   opacity: 1;
 }
 
-.card-img-wrap {
-  position: relative;
-  width: 100%;
-  overflow: hidden;
+.vcell:hover .card-date {
+  opacity: 1;
+  transform: translateY(0);
 }
 
-.card-img {
-  display: block;
+.vcell-img {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
-  animation: fadeIn 0.4s ease both;
+  animation: fadeIn 0.35s ease both;
 }
 
-.card-skeleton {
+.vcell-tint {
   position: absolute;
   inset: 0;
-  background: linear-gradient(110deg, rgba(255, 255, 255, 0.03) 30%, rgba(255, 255, 255, 0.09) 48%, rgba(255, 255, 255, 0.03) 66%);
-  background-size: 220% 100%;
-  animation: shimmer 1.6s linear infinite;
+  background:
+    radial-gradient(80% 80% at 30% 25%, rgba(169, 140, 242, 0.1), transparent 70%),
+    rgba(255, 255, 255, 0.03);
 }
 
 .card-sheen {
@@ -744,16 +774,16 @@ body {
 
 .card-date {
   position: absolute;
-  left: 10px;
-  bottom: 10px;
-  padding: 5px 11px;
+  left: 8px;
+  bottom: 8px;
+  padding: 4px 10px;
   border-radius: 999px;
-  background: rgba(10, 14, 28, 0.55);
+  background: rgba(12, 8, 22, 0.55);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   border: 1px solid rgba(255, 255, 255, 0.16);
   color: #fff;
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
   opacity: 0;
   transform: translateY(4px);
@@ -761,21 +791,16 @@ body {
   pointer-events: none;
 }
 
-.card:hover .card-date {
-  opacity: 1;
-  transform: translateY(0);
-}
-
 .card-badge {
   position: absolute;
-  top: 10px;
-  right: 10px;
+  top: 8px;
+  right: 8px;
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
-  background: rgba(10, 14, 28, 0.55);
+  background: rgba(12, 8, 22, 0.55);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   border: 1px solid rgba(255, 255, 255, 0.16);
@@ -786,22 +811,20 @@ body {
 .card-fallback {
   display: grid;
   place-items: center;
-  border-radius: 0;
   position: absolute;
   inset: 0;
-  flex-direction: column;
   gap: 8px;
 }
 
 .card-fallback .fb-ext {
-  font-size: 21px;
+  font-size: 18px;
   font-weight: 800;
   letter-spacing: 0.06em;
   color: rgba(255, 255, 255, 0.85);
 }
 
 .card-fallback .fb-sub {
-  font-size: 11px;
+  font-size: 10px;
   color: var(--text-faint);
 }
 
@@ -830,6 +853,22 @@ body {
   max-height: 100%;
   border-radius: 16px;
   box-shadow: 0 40px 120px rgba(0, 0, 0, 0.65);
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+.lb-img.ready {
+  opacity: 1;
+  animation: lbIn 0.28s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+.lb-thumb {
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 16px;
+  box-shadow: 0 40px 120px rgba(0, 0, 0, 0.65);
+  filter: blur(6px);
+  transform: scale(1.01);
   animation: lbIn 0.28s cubic-bezier(0.2, 0.8, 0.3, 1) both;
 }
 
@@ -837,6 +876,12 @@ body {
   max-width: 100%;
   max-height: 100%;
   border-radius: 16px;
+  opacity: 0;
+  transition: opacity 0.25s ease;
+}
+
+.lb-video.ready {
+  opacity: 1;
   animation: lbIn 0.28s cubic-bezier(0.2, 0.8, 0.3, 1) both;
 }
 
@@ -1130,10 +1175,6 @@ body {
 
 /* ── Responsive ────────────────────────────────────────────────── */
 
-@media (max-width: 1080px) {
-  .masonry { columns: 3; }
-}
-
 @media (max-width: 780px) {
   .topbar {
     top: 8px;
@@ -1144,8 +1185,7 @@ body {
   .year-head { top: 106px; padding: 13px 18px; gap: 14px; }
   .year-num { font-size: 32px; }
   .year-range { display: none; }
-  .masonry { columns: 2; column-gap: 10px; }
-  .masonry > * { margin-bottom: 10px; }
+  .vmonth-label { font-size: 12px; }
   .stats-bar { gap: 14px; padding: 14px 18px; }
   .stat-divider { display: none; }
   .lb-img-area { inset: 58px 10px 78px; }
@@ -1157,7 +1197,6 @@ body {
 }
 
 @media (max-width: 520px) {
-  .masonry { columns: 2; }
   .topbar .btn span.btn-label { display: none; }
   .topbar .btn { padding: 9px; }
   .folder-chip { max-width: 130px; }

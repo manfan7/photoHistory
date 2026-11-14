@@ -5,9 +5,10 @@
 import type { PhotoRecord } from './types';
 
 const DB_NAME = 'photohistory';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const META_STORE = 'meta';
 const KV_STORE = 'kv';
+const THUMBS_STORE = 'thumbs';
 
 interface CachedMeta {
   dateISO: string;
@@ -28,6 +29,7 @@ function openDb(): Promise<IDBDatabase | null> {
       const db = req.result;
       if (!db.objectStoreNames.contains(META_STORE)) db.createObjectStore(META_STORE);
       if (!db.objectStoreNames.contains(KV_STORE)) db.createObjectStore(KV_STORE);
+      if (!db.objectStoreNames.contains(THUMBS_STORE)) db.createObjectStore(THUMBS_STORE);
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => resolve(null);
@@ -84,6 +86,34 @@ export async function saveMetaBatch(entries: [string, CachedMeta][]): Promise<vo
 
 export async function clearMetaCache(): Promise<void> {
   await tx(META_STORE, 'readwrite', (s) => s.clear());
+  await tx(THUMBS_STORE, 'readwrite', (s) => s.clear());
+}
+
+export interface StoredThumb {
+  b: Blob;
+  w: number;
+  h: number;
+}
+
+export async function getThumb(key: string): Promise<StoredThumb | null> {
+  const v = await tx<StoredThumb>(THUMBS_STORE, 'readonly', (s) => s.get(key));
+  return v && v.b instanceof Blob ? v : null;
+}
+
+export async function putThumbBatch(entries: [string, StoredThumb][]): Promise<void> {
+  const db = await openDb();
+  if (!db || entries.length === 0) return;
+  await new Promise<void>((resolve) => {
+    try {
+      const t = db.transaction(THUMBS_STORE, 'readwrite');
+      const s = t.objectStore(THUMBS_STORE);
+      for (const [k, v] of entries) s.put(v, k);
+      t.oncomplete = () => resolve();
+      t.onerror = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
 }
 
 export async function getSavedHandle(): Promise<FileSystemDirectoryHandle | null> {

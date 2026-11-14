@@ -1,20 +1,37 @@
-// Lazy thumbnail pipeline: browser-decodable media → downscaled canvas
-// thumbnails; exotic formats (RAW/TIFF) → embedded JPEG preview extracted
-// by the Rust WASM core; videos → first-frame capture.
+// Thumbnail pipeline built on gallery best practices:
+//   1. decode + downscale off the main thread (thumbWorker.ts, 2 workers)
+//   2. persist generated thumbs in IndexedDB keyed by path+size+mtime —
+//      re-opening the same folder renders instantly with zero re-decodes
+//   3. bounded LRU of object URLs keeps memory flat while scrolling
+//   4. HEIC decodes via libheif first (heic2any), videos grab a poster frame
+//      on the main thread; exotic formats fall back to EXIF previews
 
-import { extractThumbnail } from './wasm';
+import { getThumb, metaKey, putThumbBatch, type StoredThumb } from './cache';
 import { heicToJpeg, isHeicExt } from './heic';
+import { extractThumbnail } from './wasm';
 import type { PhotoRecord, ThumbInfo } from './types';
 
-const MAX_EDGE = 640;
-const MAX_CONCURRENCY = 5;
+const MAX_EDGE = 560; // cards are ~150px squares; 560 covers hi-DPI
+const JPEG_QUALITY = 0.78;
+const WORKER_COUNT = 2;
+const LRU_MAX = 700;
+const IDB_WRITE_BATCH = 24;
 
-const cache = new Map<string, ThumbInfo>();
-const failed = new Set<string>();
-const pending = new Map<string, Promise<ThumbInfo | null>>();
+interface Entry {
+  url: string;
+  w: number;
+  h: number;
+}
+
+const lru = new Map<string, Entry>();
+const failedIds = new Set<string>();
+const pending = new Map<string, Promise<Entry | null>>();
+const idbBuffer = new Map<string, StoredThumb>();
+const noStoreIds = new Set<string>(); // svg etc. — don't persist
 
 let active = 0;
 const waiting: (() => void)[] = [];
+const MAX_CONCURRENCY = 6;
 
 async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
   if (active >= MAX_CONCURRENCY) {
@@ -29,41 +46,67 @@ async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-export function peekThumb(id: string): ThumbInfo | null {
-  return cache.get(id) ?? null;
-}
+// ── worker pool ─────────────────────────────────────────────────
 
-export function ensureThumb(
-  rec: PhotoRecord,
-  getFile: (id: string) => Promise<File>,
-): Promise<ThumbInfo | null> {
-  const hit = cache.get(rec.id);
-  if (hit) return Promise.resolve(hit);
-  if (failed.has(rec.id)) return Promise.resolve(null);
+type WorkerResult = { blob: Blob; w: number; h: number } | { error: string };
 
-  let p = pending.get(rec.id);
-  if (!p) {
-    p = withSlot(() => generate(rec, getFile)).finally(() => pending.delete(rec.id));
-    pending.set(rec.id, p);
-  }
-  return p;
-}
+const workers: Worker[] = [];
+const workerBusy: boolean[] = [];
+const workerWaiters = new Map<number, (r: WorkerResult) => void>();
+let workerTaskSeq = 0;
+const workerQueue: {
+  blob: Blob;
+  resolve: (r: WorkerResult) => void;
+}[] = [];
 
-async function generate(rec: PhotoRecord, getFile: (id: string) => Promise<File>): Promise<ThumbInfo | null> {
-  try {
-    const file = await getFile(rec.id);
-    const info = rec.kind === 'video' ? await videoThumb(file) : await imageThumb(file, rec);
-    if (info) {
-      cache.set(rec.id, info);
-      return info;
+function initWorkers(): boolean {
+  if (workers.length > 0) return true;
+  if (typeof Worker === 'undefined' || typeof OffscreenCanvas === 'undefined') return false;
+  for (let i = 0; i < WORKER_COUNT; i++) {
+    try {
+      const w = new Worker(new URL('./thumbWorker.ts', import.meta.url));
+      const idx = i;
+      w.onmessage = (e: MessageEvent<{ id: number } & WorkerResult>) => {
+        const { id, ...result } = e.data;
+        const waiter = workerWaiters.get(id);
+        workerWaiters.delete(id);
+        workerBusy[idx] = false;
+        waiter?.(result as WorkerResult);
+        dispatchWorkerTasks();
+      };
+      w.onerror = () => {
+        workerBusy[idx] = false;
+        dispatchWorkerTasks();
+      };
+      workers.push(w);
+      workerBusy.push(false);
+    } catch {
+      return false;
     }
-    failed.add(rec.id);
-    return null;
-  } catch {
-    failed.add(rec.id);
-    return null;
+  }
+  return workers.length > 0;
+}
+
+function dispatchWorkerTasks() {
+  for (let i = 0; i < workers.length; i++) {
+    if (workerBusy[i]) continue;
+    const task = workerQueue.shift();
+    if (!task) return;
+    workerBusy[i] = true;
+    const id = ++workerTaskSeq;
+    workerWaiters.set(id, task.resolve);
+    workers[i].postMessage({ id, blob: task.blob, maxEdge: MAX_EDGE, quality: JPEG_QUALITY });
   }
 }
+
+function decodeViaWorker(blob: Blob): Promise<WorkerResult> {
+  return new Promise((resolve) => {
+    workerQueue.push({ blob, resolve });
+    dispatchWorkerTasks();
+  });
+}
+
+// ── main-thread fallback (old browsers / worker failure) ────────
 
 function makeCanvas(w: number, h: number): { canvas: HTMLCanvasElement | OffscreenCanvas; ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D } {
   if (typeof OffscreenCanvas !== 'undefined') {
@@ -79,79 +122,44 @@ function makeCanvas(w: number, h: number): { canvas: HTMLCanvasElement | Offscre
 async function canvasToJpegUrl(canvas: HTMLCanvasElement | OffscreenCanvas): Promise<string> {
   const blob =
     'convertToBlob' in canvas
-      ? await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.82 })
+      ? await canvas.convertToBlob({ type: 'image/jpeg', quality: JPEG_QUALITY })
       : await new Promise<Blob>((resolve, reject) =>
           (canvas as HTMLCanvasElement).toBlob(
             (b) => (b ? resolve(b) : reject(new Error('toBlob failed'))),
             'image/jpeg',
-            0.82,
+            JPEG_QUALITY,
           ),
         );
   return URL.createObjectURL(blob);
 }
 
-async function bitmapToThumb(bitmap: ImageBitmap): Promise<ThumbInfo> {
-  const scale = Math.min(1, MAX_EDGE / Math.max(bitmap.width, bitmap.height));
-  const w = Math.max(1, Math.round(bitmap.width * scale));
-  const h = Math.max(1, Math.round(bitmap.height * scale));
-  const { canvas, ctx } = makeCanvas(w, h);
-  ctx.drawImage(bitmap, 0, 0, w, h);
-  bitmap.close();
-  const url = await canvasToJpegUrl(canvas);
-  return { url, w, h };
+async function decodeMainThread(blob: Blob): Promise<{ blob: Blob; w: number; h: number } | null> {
+  if (typeof createImageBitmap === 'undefined') return null;
+  try {
+    const bitmap = await createImageBitmap(blob);
+    const scale = Math.min(1, MAX_EDGE / Math.max(bitmap.width, bitmap.height));
+    const w = Math.max(1, Math.round(bitmap.width * scale));
+    const h = Math.max(1, Math.round(bitmap.height * scale));
+    const { canvas, ctx } = makeCanvas(w, h);
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    bitmap.close();
+    const out =
+      'convertToBlob' in canvas
+        ? await canvas.convertToBlob({ type: 'image/jpeg', quality: JPEG_QUALITY })
+        : await new Promise<Blob>((resolve, reject) =>
+            (canvas as HTMLCanvasElement).toBlob(
+              (b) => (b ? resolve(b) : reject(new Error('toBlob failed'))),
+              'image/jpeg',
+              JPEG_QUALITY,
+            ),
+          );
+    return { blob: out, w, h };
+  } catch {
+    return null;
+  }
 }
 
-async function imageThumb(file: File, rec: PhotoRecord): Promise<ThumbInfo | null> {
-  if (typeof createImageBitmap === 'function' && file.type !== 'image/svg+xml') {
-    try {
-      return await bitmapToThumb(await createImageBitmap(file));
-    } catch {
-      // native decode failed — HEIC on Chrome/Firefox, or a broken file
-    }
-  }
-
-  // HEIC/HEIF: decode through the libheif vendor bundle, then downscale as usual
-  if (isHeicExt(rec.ext) && typeof createImageBitmap === 'function') {
-    try {
-      const jpg = await heicToJpeg(file);
-      if (jpg) return await bitmapToThumb(await createImageBitmap(jpg));
-    } catch {
-      // fall through to the embedded preview / format tile
-    }
-  }
-
-  if (file.type === 'image/svg+xml') {
-    return { url: URL.createObjectURL(file), w: 4, h: 3 };
-  }
-
-  // EXIF thumbnails live in the metadata near the start of the file
-  const headSize = Math.min(file.size, 8 * 1024 * 1024);
-  const buf = new Uint8Array(await file.slice(0, headSize).arrayBuffer());
-  const jpg = await extractThumbnail(buf);
-  if (jpg && jpg.length > 128) {
-    const url = URL.createObjectURL(new Blob([jpg as unknown as BlobPart], { type: 'image/jpeg' }));
-    const dims = await measureImage(url);
-    return { url, w: dims.w, h: dims.h };
-  }
-  return null;
-}
-
-async function measureImage(url: string): Promise<{ w: number; h: number }> {
-  return new Promise((resolve) => {
-    const img = new Image();
-    const done = { w: 4, h: 3 };
-    const timer = setTimeout(() => resolve(done), 4000);
-    img.onload = () => {
-      clearTimeout(timer);
-      resolve({ w: img.naturalWidth || 4, h: img.naturalHeight || 3 });
-    };
-    img.onerror = () => {
-      clearTimeout(timer);
-      resolve(done);
-    };
-    img.src = url;
-  });
-}
+// ── video poster (main thread — needs a DOM element) ────────────
 
 function eventOnce(el: HTMLElement, event: string, timeoutMs: number): Promise<void> {
   return new Promise((resolve) => {
@@ -167,7 +175,11 @@ function eventOnce(el: HTMLElement, event: string, timeoutMs: number): Promise<v
   });
 }
 
-function isBlankFrame(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D, w: number, h: number): boolean {
+function isBlankFrame(
+  ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  w: number,
+  h: number,
+): boolean {
   try {
     const data = ctx.getImageData(0, 0, w, h).data;
     let lit = 0;
@@ -180,7 +192,7 @@ function isBlankFrame(ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingCo
   }
 }
 
-async function videoThumb(file: File): Promise<ThumbInfo | null> {
+async function videoThumb(file: File): Promise<{ blob: Blob; w: number; h: number } | null> {
   const url = URL.createObjectURL(file);
   const video = document.createElement('video');
   video.muted = true;
@@ -203,11 +215,18 @@ async function videoThumb(file: File): Promise<ThumbInfo | null> {
     const h = Math.max(1, Math.round(vh * scale));
     const { canvas, ctx } = makeCanvas(w, h);
     ctx.drawImage(video, 0, 0, w, h);
-    // An undecodable file still yields a canvas — but painted black. Detect
-    // that and report failure so the card shows its format tile instead.
     if (isBlankFrame(ctx, w, h)) return null;
-    const poster = await canvasToJpegUrl(canvas);
-    return { url: poster, w, h };
+    const blob =
+      'convertToBlob' in canvas
+        ? await canvas.convertToBlob({ type: 'image/jpeg', quality: JPEG_QUALITY })
+        : await new Promise<Blob>((resolve, reject) =>
+            (canvas as HTMLCanvasElement).toBlob(
+              (b) => (b ? resolve(b) : reject(new Error('toBlob failed'))),
+              'image/jpeg',
+              JPEG_QUALITY,
+            ),
+          );
+    return { blob, w, h };
   } catch {
     return null;
   } finally {
@@ -215,4 +234,121 @@ async function videoThumb(file: File): Promise<ThumbInfo | null> {
     video.load();
     URL.revokeObjectURL(url);
   }
+}
+
+// ── IndexedDB write buffering ───────────────────────────────────
+
+function queueIdbPut(rec: PhotoRecord, thumb: StoredThumb) {
+  idbBuffer.set(metaKey(rec), thumb);
+  if (idbBuffer.size >= IDB_WRITE_BATCH) void flushIdb();
+}
+
+async function flushIdb(): Promise<void> {
+  if (idbBuffer.size === 0) return;
+  const entries = [...idbBuffer.entries()];
+  idbBuffer.clear();
+  await putThumbBatch(entries);
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', () => void flushIdb());
+}
+
+// ── public API ──────────────────────────────────────────────────
+
+function lruSet(id: string, entry: Entry) {
+  if (lru.has(id)) lru.delete(id);
+  lru.set(id, entry);
+  if (lru.size > LRU_MAX) {
+    for (const [oldId, old] of lru) {
+      if (lru.size <= LRU_MAX * 0.8) break;
+      URL.revokeObjectURL(old.url);
+      lru.delete(oldId);
+      failedIds.delete(oldId); // allow regeneration on revisit
+    }
+  }
+}
+
+export function peekThumb(id: string): ThumbInfo | null {
+  const hit = lru.get(id);
+  if (hit) {
+    lru.delete(id);
+    lru.set(id, hit); // refresh LRU position
+    return hit;
+  }
+  return null;
+}
+
+export function ensureThumb(
+  rec: PhotoRecord,
+  getFile: (id: string) => Promise<File>,
+): Promise<ThumbInfo | null> {
+  const hit = peekThumb(rec.id);
+  if (hit) return Promise.resolve(hit);
+  if (failedIds.has(rec.id)) return Promise.resolve(null);
+
+  let p = pending.get(rec.id);
+  if (!p) {
+    p = withSlot(() => generate(rec, getFile)).finally(() => pending.delete(rec.id));
+    pending.set(rec.id, p);
+  }
+  return p;
+}
+
+async function generate(rec: PhotoRecord, getFile: (id: string) => Promise<File>): Promise<Entry | null> {
+  try {
+    const file = await getFile(rec.id);
+    let out: { blob: Blob; w: number; h: number } | null = null;
+
+    if (rec.kind === 'video') {
+      out = await videoThumb(file);
+    } else if (file.type === 'image/svg+xml') {
+      noStoreIds.add(rec.id);
+      return { url: URL.createObjectURL(file), w: 4, h: 3 };
+    } else {
+      let src: Blob = file;
+      if (isHeicExt(rec.ext)) {
+        const jpg = await heicToJpeg(file);
+        if (!jpg) throw new Error('heic decode failed');
+        src = jpg;
+      }
+      const result = initWorkers()
+        ? await raceWorkerFallback(src)
+        : await decodeMainThread(src);
+      out = result;
+    }
+
+    if (!out || out.w < 1) {
+      // try the EXIF embedded preview before giving up
+      const head = new Uint8Array(await file.slice(0, Math.min(file.size, 8 * 1024 * 1024)).arrayBuffer());
+      const jpg = await extractThumbnail(head);
+      if (jpg && jpg.length > 128) {
+        const blob = new Blob([jpg as unknown as BlobPart], { type: 'image/jpeg' });
+        out = (await decodeMainThread(blob)) ?? (await unwrapWorker(await decodeViaWorker(blob)));
+      }
+    }
+
+    if (!out) {
+      failedIds.add(rec.id);
+      return null;
+    }
+
+    const entry: Entry = { url: URL.createObjectURL(out.blob), w: out.w, h: out.h };
+    lruSet(rec.id, entry);
+    if (!noStoreIds.has(rec.id)) queueIdbPut(rec, { b: out.blob, w: out.w, h: out.h });
+    return entry;
+  } catch {
+    failedIds.add(rec.id);
+    return null;
+  }
+}
+
+async function raceWorkerFallback(src: Blob): Promise<{ blob: Blob; w: number; h: number } | null> {
+  const result = await decodeViaWorker(src);
+  if ('error' in result) return decodeMainThread(src);
+  return result;
+}
+
+async function unwrapWorker(result: WorkerResult): Promise<{ blob: Blob; w: number; h: number } | null> {
+  return 'error' in result ? null : result;
 }
