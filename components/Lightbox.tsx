@@ -66,6 +66,10 @@ export default function Lightbox({
 
   // zoom / pan state; zoom=1 means "fit the screen" (object-fit: contain)
   const [view, setView] = useState<ViewState>({ zoom: 1, x: 0, y: 0 });
+  // handlers read this ref instead of the render-time view — gestures that
+  // happen in the same tick as a zoom (pinch chains, fast wheel+drag) must
+  // see the freshest zoom, not the one from the last committed render
+  const viewRef = useRef<ViewState>({ zoom: 1, x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -106,23 +110,30 @@ export default function Lightbox({
     return { x: Math.min(mx, Math.max(-mx, x)), y: Math.min(my, Math.max(-my, y)) };
   }, []);
 
+  // imperative viewport setter — the gesture ref is updated synchronously at
+  // call time (React updaters run lazily at render, which breaks same-tick
+  // gesture chains like wheel→drag or pinch steps)
+  const setViewState = useCallback((next: ViewState) => {
+    viewRef.current = next;
+    setView(next);
+  }, []);
+
   const zoomAt = useCallback(
     (clientX: number, clientY: number, factor: number) => {
-      setView((v) => {
-        const nz = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.zoom * factor));
-        if (nz === v.zoom) return v;
-        const st = stageRef.current;
-        if (!st) return v;
-        const r = st.getBoundingClientRect();
-        const cx = clientX - (r.left + r.width / 2);
-        const cy = clientY - (r.top + r.height / 2);
-        const nx = (v.x + cx) * (nz / v.zoom) - cx;
-        const ny = (v.y + cy) * (nz / v.zoom) - cy;
-        const c = clampOffset(nx, ny, nz);
-        return { zoom: nz, x: c.x, y: c.y };
-      });
+      const v = viewRef.current;
+      const nz = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, v.zoom * factor));
+      if (nz === v.zoom) return;
+      const st = stageRef.current;
+      if (!st) return;
+      const r = st.getBoundingClientRect();
+      const cx = clientX - (r.left + r.width / 2);
+      const cy = clientY - (r.top + r.height / 2);
+      const nx = (v.x + cx) * (nz / v.zoom) - cx;
+      const ny = (v.y + cy) * (nz / v.zoom) - cy;
+      const c = clampOffset(nx, ny, nz);
+      setViewState({ zoom: nz, x: c.x, y: c.y });
     },
-    [clampOffset],
+    [clampOffset, setViewState],
   );
 
   const zoomCenter = useCallback(
@@ -141,22 +152,26 @@ export default function Lightbox({
     if (!img || !st || !img.naturalWidth) return;
     const fit = Math.min(st.clientWidth / img.naturalWidth, st.clientHeight / img.naturalHeight);
     const target = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, 1 / fit));
-    setView((v) => ({ zoom: target, x: clampOffsetRef.current.x, y: clampOffsetRef.current.y }));
-  }, []);
+    const v = viewRef.current;
+    const c = clampOffset(v.x, v.y, target);
+    setViewState({ zoom: target, x: c.x, y: c.y });
+  }, [clampOffset, setViewState]);
 
-  // keep a stable clamp for fitOneToOne (clamped to current zoom)
-  const clampOffsetRef = useRef({ x: 0, y: 0 });
+  // reset the viewport when the photo changes; lock page scroll behind the box
   useEffect(() => {
-    clampOffsetRef.current = clampOffset(0, 0, 1);
-  });
-
-  // reset the viewport when the photo changes
-  useEffect(() => {
-    setView({ zoom: 1, x: 0, y: 0 });
+    setViewState({ zoom: 1, x: 0, y: 0 });
     setDragging(false);
     pinchRef.current.clear();
     pinchDistRef.current = null;
-  }, [rec?.id]);
+  }, [rec?.id, setViewState]);
+
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, []);
 
   // wheel zoom (non-passive so we can preventDefault)
   useEffect(() => {
@@ -259,7 +274,7 @@ export default function Lightbox({
         className="lb-stage"
         onDoubleClick={(e) => {
           if (!zoomable) return;
-          if (view.zoom > 1.01) setView({ zoom: 1, x: 0, y: 0 });
+          if (viewRef.current.zoom > 1.01) setViewState({ zoom: 1, x: 0, y: 0 });
           else zoomAt(e.clientX, e.clientY, 2.5);
         }}
         onPointerDown={(e) => {
@@ -271,9 +286,13 @@ export default function Lightbox({
             setDragging(false);
             return;
           }
-          if (view.zoom > 1.001) {
-            (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
-            dragRef.current = { px: e.clientX, py: e.clientY, ox: view.x, oy: view.y };
+          if (viewRef.current.zoom > 1.001) {
+            try {
+              (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
+            } catch {
+              /* synthetic/test pointers have no capture target */
+            }
+            dragRef.current = { px: e.clientX, py: e.clientY, ox: viewRef.current.x, oy: viewRef.current.y };
             setDragging(true);
           }
         }}
@@ -293,10 +312,9 @@ export default function Lightbox({
           if (dragRef.current) {
             const dx = e.clientX - dragRef.current.px;
             const dy = e.clientY - dragRef.current.py;
-            setView((v) => {
-              const c = clampOffset(dragRef.current!.ox + dx, dragRef.current!.oy + dy, v.zoom);
-              return { zoom: v.zoom, x: c.x, y: c.y };
-            });
+            const v = viewRef.current;
+            const c = clampOffset(dragRef.current.ox + dx, dragRef.current.oy + dy, v.zoom);
+            setViewState({ zoom: v.zoom, x: c.x, y: c.y });
           }
         }}
         onPointerUp={(e) => {
@@ -379,7 +397,7 @@ export default function Lightbox({
               1:1
             </button>
             <button
-              onClick={() => setView({ zoom: 1, x: 0, y: 0 })}
+              onClick={() => setViewState({ zoom: 1, x: 0, y: 0 })}
               aria-label="Вписать в экран"
               title="Вписать в экран"
             >

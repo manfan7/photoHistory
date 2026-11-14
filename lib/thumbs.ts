@@ -13,7 +13,11 @@ import type { PhotoRecord, ThumbInfo } from './types';
 
 const MAX_EDGE = 560; // cards are ~150px squares; 560 covers hi-DPI
 const JPEG_QUALITY = 0.78;
-const WORKER_COUNT = 2;
+// one worker per spare core (2–6) — decodes are CPU-bound and parallelize
+const WORKER_COUNT =
+  typeof navigator !== 'undefined' && navigator.hardwareConcurrency
+    ? Math.max(2, Math.min(6, navigator.hardwareConcurrency - 2))
+    : 3;
 const LRU_MAX = 700;
 const IDB_WRITE_BATCH = 24;
 
@@ -31,7 +35,7 @@ const noStoreIds = new Set<string>(); // svg etc. — don't persist
 
 let active = 0;
 const waiting: (() => void)[] = [];
-const MAX_CONCURRENCY = 6;
+const MAX_CONCURRENCY = 8;
 
 async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
   if (active >= MAX_CONCURRENCY) {

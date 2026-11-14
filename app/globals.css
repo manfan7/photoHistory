@@ -840,7 +840,7 @@ body {
   animation: fadeIn 0.22s ease both;
 }
 
-.lb-img-area {
+.lb-stage {
   position: absolute;
   inset: 64px 24px 84px;
   display: flex;
@@ -871,7 +871,9 @@ body {
 
 .lb-img.ready {
   opacity: 1;
-  animation: lbIn 0.28s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+  /* opacity-only entrance — a transform keyframe here would override the
+     zoom/pan inline transform (animation beats inline styles with fill:both) */
+  animation: fadeIn 0.25s ease both;
 }
 
 .lb-thumb {
@@ -1386,7 +1388,7 @@ body {
   .vmonth-label { font-size: 12px; }
   .stats-bar { gap: 14px; padding: 14px 18px; }
   .stat-divider { display: none; }
-  .lb-img-area { inset: 58px 10px 78px; }
+  .lb-stage { inset: 58px 10px 78px; }
   .lb-btn.prev { left: 10px; }
   .lb-btn.next { right: 10px; }
   .lb-btn { width: 44px; height: 44px; }
