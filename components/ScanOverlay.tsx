@@ -23,9 +23,9 @@ export default function ScanOverlay({ state, onCancel }: Props) {
           <svg width="148" height="148" viewBox="0 0 148 148">
             <defs>
               <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                <stop offset="0%" stopColor="#5ea2ff" />
-                <stop offset="55%" stopColor="#9b6eff" />
-                <stop offset="100%" stopColor="#ff6ec7" />
+                <stop offset="0%" stopColor="#a98cf2" />
+                <stop offset="55%" stopColor="#f0a3cc" />
+                <stop offset="100%" stopColor="#e26a9e" />
               </linearGradient>
             </defs>
             <circle className="ring-bg" cx="74" cy="74" r={R} />

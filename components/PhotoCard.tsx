@@ -15,7 +15,8 @@ interface Props {
 function hueFor(ext: string): number {
   let h = 0;
   for (let i = 0; i < ext.length; i++) h = (h * 31 + ext.charCodeAt(i)) % 360;
-  return h;
+  // keep fallback tiles inside the soft violet→pink→raspberry palette
+  return 262 + (h % 92);
 }
 
 export default function PhotoCard({ rec, getFile, onOpen }: Props) {

@@ -37,7 +37,7 @@ export default function Lightbox({ records, index, getFile, onClose, onIndexChan
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape' || e.key === 'Backspace') onClose();
       else if (e.key === 'ArrowLeft') newer();
       else if (e.key === 'ArrowRight') older();
     };
@@ -161,6 +161,10 @@ export default function Lightbox({ records, index, getFile, onClose, onIndexChan
       </div>
 
       <div className="lb-top glass glass-strong">
+        <button className="lb-back" onClick={onClose} aria-label="Назад к архиву">
+          <IconChevronLeft size={15} />
+          <span>Назад</span>
+        </button>
         <span className="lb-name">{rec.name}</span>
         <span className="lb-counter">
           {records.length - index} / {records.length}
