@@ -54,12 +54,13 @@ export default function YearNav({ groups, activeYear, onJump }: Props) {
     };
   }, [groups, updateArrows]);
 
-  // keep the active year chip visible (scroll-spy updates it constantly)
+  // keep the active year chip visible (scroll-spy updates it constantly);
+  // instant — smooth scrolling stalls in throttled webview states
   useEffect(() => {
     const el = navRef.current;
     if (!el || activeYear === null) return;
     const chip = el.querySelector('.chip.active');
-    chip?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+    chip?.scrollIntoView({ behavior: 'auto', block: 'nearest', inline: 'center' });
   }, [activeYear]);
 
   const onPointerDown = (e: React.PointerEvent) => {
@@ -67,11 +68,8 @@ export default function YearNav({ groups, activeYear, onJump }: Props) {
     const el = navRef.current;
     if (!el) return;
     drag.current = { startX: e.clientX, startLeft: el.scrollLeft, moved: false };
-    try {
-      el.setPointerCapture(e.pointerId);
-    } catch {
-      /* synthetic pointers have no capture target */
-    }
+    // NOTE: no setPointerCapture here — capturing on pointerdown retargets the
+    // subsequent click to the strip, so year chips would never receive clicks.
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
@@ -79,7 +77,14 @@ export default function YearNav({ groups, activeYear, onJump }: Props) {
     const el = navRef.current;
     if (!d || !el) return;
     const dx = e.clientX - d.startX;
-    if (Math.abs(dx) > 5) d.moved = true;
+    if (!d.moved && Math.abs(dx) > 5) {
+      d.moved = true;
+      try {
+        el.setPointerCapture(e.pointerId); // capture only once a real drag starts
+      } catch {
+        /* synthetic pointers have no capture target */
+      }
+    }
     if (d.moved) el.scrollLeft = d.startLeft - dx;
   };
 

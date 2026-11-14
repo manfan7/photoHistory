@@ -403,7 +403,8 @@ export default function Page() {
   }, [phase, groups]);
 
   const jumpToYear = (year: number) => {
-    document.getElementById(`year-${year}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // instant jump — smooth scrolling stalls in throttled webview states
+    document.getElementById(`year-${year}`)?.scrollIntoView({ behavior: 'auto', block: 'start' });
   };
 
   const openViewer = (globalIndex: number) => setViewerIndex(globalIndex);
