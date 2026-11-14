@@ -1,0 +1,8 @@
+node_modules/
+.next/
+out/
+wasm/target/
+wasm/pkg/
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
