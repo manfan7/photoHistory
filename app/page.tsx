@@ -5,6 +5,7 @@ import TopBar, { type ViewMode } from '@/components/TopBar';
 import EmptyState from '@/components/EmptyState';
 import ScanOverlay from '@/components/ScanOverlay';
 import YearSection from '@/components/YearSection';
+import YearNav from '@/components/YearNav';
 import Lightbox from '@/components/Lightbox';
 import ContextMenu from '@/components/ContextMenu';
 import {
@@ -521,18 +522,7 @@ export default function Page() {
             )}
           </div>
 
-          <div className="year-nav" key={thumbEpoch}>
-            {groups.map((g) => (
-              <button
-                key={g.year}
-                className={`chip${activeYear === g.year ? ' active' : ''}`}
-                onClick={() => jumpToYear(g.year)}
-              >
-                {g.year}
-                <span style={{ opacity: 0.55 }}>{g.records.length}</span>
-              </button>
-            ))}
-          </div>
+          <YearNav groups={groups} activeYear={activeYear} onJump={jumpToYear} />
 
           <div className="archive">
             {groups.map((g) => (

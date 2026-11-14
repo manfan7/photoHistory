@@ -313,19 +313,27 @@ body {
   font-size: 13.5px;
 }
 
-/* year quick-nav */
-.year-nav {
+/* year quick-nav — sticky wrapper with arrows for overflowing years */
+.year-nav-wrap {
   position: sticky;
   top: 76px;
   z-index: 49;
   margin: 10px auto 0;
   width: min(1180px, calc(100% - 28px));
+}
+
+.year-nav {
   display: flex;
   gap: 8px;
   overflow-x: auto;
-  padding: 4px 6px;
+  padding: 4px 34px;
   scrollbar-width: none;
-  animation: dropIn 0.5s 0.05s ease both;
+  cursor: grab;
+  touch-action: pan-y;
+}
+
+.year-nav:active {
+  cursor: grabbing;
 }
 
 .year-nav::-webkit-scrollbar {
@@ -342,6 +350,69 @@ body {
   color: #fff;
   background: rgba(255, 255, 255, 0.14);
   border-color: var(--glass-border-strong);
+}
+
+.year-nav-wrap .fade {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 44px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.year-nav-wrap .fade.left {
+  left: 0;
+  background: linear-gradient(90deg, rgba(10, 7, 20, 0.92), transparent);
+}
+
+.year-nav-wrap .fade.right {
+  right: 0;
+  background: linear-gradient(-90deg, rgba(10, 7, 20, 0.92), transparent);
+}
+
+.year-nav-wrap.can-left .fade.left,
+.year-nav-wrap.can-right .fade.right {
+  opacity: 1;
+}
+
+.year-nav-arrow {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: var(--text);
+  cursor: pointer;
+  z-index: 2;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.15s ease;
+}
+
+.year-nav-arrow:hover {
+  transform: translateY(-50%) scale(1.08);
+}
+
+.year-nav-wrap.can-left .year-nav-arrow.left {
+  left: 4px;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.year-nav-wrap.can-right .year-nav-arrow.right {
+  right: 4px;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (max-width: 780px) {
+  .year-nav-wrap { top: 64px; }
+  .year-nav { padding: 4px 30px; }
 }
 
 /* menu */
