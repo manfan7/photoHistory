@@ -16,6 +16,7 @@ import {
   kindOf,
 } from './formats';
 import { loadMetaCache, metaKey, saveMetaBatch } from './cache';
+import { dateFromName, dateFromPath } from './dateHints';
 import type { DateSource, PhotoRecord, ScanResult, ScanState } from './types';
 
 const HEAD_BYTES = 2 * 1024 * 1024; // metadata almost always lives in the first 2 MB
@@ -36,6 +37,8 @@ interface WalkItem {
 }
 
 interface CacheEntry {
+  /** cache format version — v1 entries (no name-hint dating) are ignored */
+  v: 2;
   dateISO: string;
   dateSource: DateSource;
   camera: string | null;
@@ -220,11 +223,21 @@ async function analyzeFile(
   }
 
   if (!dateISO) {
+    // metadata missing (stripped by messengers/editors) — try the file name,
+    // then folder names, before settling for the filesystem mtime
+    const hint = dateFromName(file.name) ?? dateFromPath(relPath);
+    if (hint) {
+      dateISO = hint;
+      dateSource = 'name';
+    }
+  }
+
+  if (!dateISO) {
     dateISO = fmtLocal(new Date(file.lastModified));
     dateSource = 'fs';
   }
 
-  const entry: CacheEntry = { dateISO, dateSource, camera, hasEmbeddedThumb };
+  const entry: CacheEntry = { v: 2, dateISO, dateSource, camera, hasEmbeddedThumb };
   newCacheEntries.push([key, entry]);
   return finalizeRecord(file, relPath, ext, kind, entry);
 }

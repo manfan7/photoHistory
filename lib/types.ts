@@ -1,4 +1,4 @@
-export type DateSource = 'exif' | 'container' | 'fs';
+export type DateSource = 'exif' | 'container' | 'name' | 'fs';
 
 export interface PhotoRecord {
   /** Stable id — relative path inside the scanned folder */

@@ -10,6 +10,9 @@ interface Props {
   records: PhotoRecord[];
   getFile: (id: string) => Promise<File>;
   onOpen: (index: number) => void;
+  favs: Set<string>;
+  prints: Set<string>;
+  onCellContext: (rec: PhotoRecord, e: React.MouseEvent) => void;
 }
 
 interface GridMetrics {
@@ -151,7 +154,7 @@ function useRowWindow(ref: React.RefObject<HTMLDivElement | null>, rows: RowSpec
   return range;
 }
 
-export default function YearSection({ year, records, getFile, onOpen }: Props) {
+export default function YearSection({ year, records, getFile, onOpen, favs, prints, onCellContext }: Props) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const metrics = useGridMetrics(wrapRef);
   const { rows, total } = useMemo(() => buildRows(records, metrics), [records, metrics]);
@@ -231,6 +234,9 @@ export default function YearSection({ year, records, getFile, onOpen }: Props) {
                   key={rec.id}
                   rec={rec}
                   getFile={getFile}
+                  fav={favs.has(rec.id)}
+                  printed={prints.has(rec.id)}
+                  onContext={(e) => onCellContext(rec, e)}
                   onOpen={() => {
                     const idx = idxById.get(rec.id);
                     if (idx !== undefined) onOpen(idx);

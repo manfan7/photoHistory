@@ -1,15 +1,31 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import TopBar from '@/components/TopBar';
+import TopBar, { type ViewMode } from '@/components/TopBar';
 import EmptyState from '@/components/EmptyState';
 import ScanOverlay from '@/components/ScanOverlay';
 import YearSection from '@/components/YearSection';
 import Lightbox from '@/components/Lightbox';
-import { IconCalendar, IconFolder, IconImage, IconSparkle, IconVideo } from '@/components/icons';
+import ContextMenu from '@/components/ContextMenu';
+import {
+  IconCalendar,
+  IconFolder,
+  IconHeart,
+  IconImage,
+  IconPrinter,
+  IconSparkle,
+  IconVideo,
+} from '@/components/icons';
 import { scanDirectoryHandle, scanFileList, type ScanCallbacks } from '@/lib/scanner';
 import { humanSize, plural } from '@/lib/formats';
 import { clearMetaCache, getSavedHandle, saveHandle } from '@/lib/cache';
+import { FAV_STORE, PRINT_DIR_STORE, PRINT_STORE } from '@/lib/favorites';
+import {
+  describePrintDir,
+  pickPrintDir,
+  saveForPrint,
+  type PrintDirRef,
+} from '@/lib/desktop';
 import { getWasm } from '@/lib/wasm';
 import type { PhotoRecord, ScanState } from '@/lib/types';
 
@@ -35,6 +51,11 @@ export default function Page() {
   const [supportsFSA, setSupportsFSA] = useState(false);
   const [activeYear, setActiveYear] = useState<number | null>(null);
   const [thumbEpoch, setThumbEpoch] = useState(0);
+  const [view, setView] = useState<ViewMode>('all');
+  const [favs, setFavs] = useState<Set<string>>(new Set());
+  const [prints, setPrints] = useState<Set<string>>(new Set());
+  const [printDir, setPrintDir] = useState<PrintDirRef | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; rec: PhotoRecord } | null>(null);
 
   const getFileRef = useRef<((id: string) => Promise<File>) | null>(null);
   const lastSourceRef = useRef<FileSystemDirectoryHandle | File[] | null>(null);
@@ -52,10 +73,26 @@ export default function Page() {
     (async () => {
       const h = await getSavedHandle();
       if (h) setRestoredName(h.name);
+      const [favsSaved, printsSaved, dirSaved] = await Promise.all([
+        FAV_STORE.load(),
+        PRINT_STORE.load(),
+        PRINT_DIR_STORE.load(),
+      ]);
+      setFavs(favsSaved);
+      setPrints(printsSaved);
+      if (dirSaved) setPrintDir(dirSaved);
       void getWasm();
     })();
     if (inputRef.current) {
       (inputRef.current as unknown as { webkitdirectory: boolean }).webkitdirectory = true;
+    }
+    // debug hooks for automated testing (?debug=1)
+    if (typeof window !== 'undefined' && window.location.search.includes('debug=1')) {
+      (window as unknown as Record<string, unknown>).__phDebug = {
+        setPrintDir,
+        setFavs,
+        setPrints,
+      };
     }
   }, []);
 
@@ -182,10 +219,103 @@ export default function Page() {
     rescan();
   }, [rescan, showToast]);
 
+  // ── favorites / print handlers ──────────────────────────────────
+  const toggleFav = useCallback((rec: PhotoRecord) => {
+    setFavs((prev) => {
+      const next = new Set(prev);
+      if (next.has(rec.id)) next.delete(rec.id);
+      else next.add(rec.id);
+      void FAV_STORE.save(next);
+      return next;
+    });
+  }, []);
+
+  const choosePrintDir = useCallback(async (): Promise<PrintDirRef | null> => {
+    try {
+      const dir = await pickPrintDir();
+      if (dir) {
+        setPrintDir(dir);
+        void PRINT_DIR_STORE.save(dir);
+      }
+      return dir;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const saveRecForPrint = useCallback(
+    async (rec: PhotoRecord) => {
+      let dir = printDir;
+      if (!dir) dir = await choosePrintDir();
+      if (!dir) {
+        showToast('Папка для печати не выбрана');
+        return;
+      }
+      try {
+        const file = await getFileRef.current!(rec.id);
+        const finalName = await saveForPrint(dir, file, rec.name);
+        setPrints((prev) => {
+          const next = new Set(prev).add(rec.id);
+          void PRINT_STORE.save(next);
+          return next;
+        });
+        showToast(`Скопировано для печати: ${finalName}`);
+      } catch (err) {
+        console.error(err);
+        showToast('Не удалось скопировать файл');
+      }
+    },
+    [printDir, choosePrintDir, showToast],
+  );
+
+  const togglePrint = useCallback(
+    (rec: PhotoRecord) => {
+      if (prints.has(rec.id)) {
+        setPrints((prev) => {
+          const next = new Set(prev);
+          next.delete(rec.id);
+          void PRINT_STORE.save(next);
+          return next;
+        });
+        showToast('Убрано из печати');
+      } else {
+        void saveRecForPrint(rec);
+      }
+    },
+    [prints, saveRecForPrint, showToast],
+  );
+
+  const saveAllForPrint = useCallback(async () => {
+    let dir = printDir;
+    if (!dir) dir = await choosePrintDir();
+    if (!dir) {
+      showToast('Папка для печати не выбрана');
+      return;
+    }
+    const list = records.filter((r) => prints.has(r.id));
+    let ok = 0;
+    for (const rec of list) {
+      try {
+        const f = await getFileRef.current!(rec.id);
+        await saveForPrint(dir, f, rec.name);
+        ok++;
+      } catch {
+        /* keep going */
+      }
+    }
+    showToast(`Скопировано ${ok} из ${list.length}`);
+  }, [printDir, choosePrintDir, records, prints, showToast]);
+
   // ── grouping ─────────────────────────────────────────────────────
+  const viewRecords = useMemo(() => {
+    if (view === 'fav') return records.filter((r) => favs.has(r.id));
+    if (view === 'print') return records.filter((r) => prints.has(r.id));
+    return records;
+  }, [view, records, favs, prints]);
+
   const groups = useMemo(() => {
     const byYear = new Map<number, PhotoRecord[]>();
-    for (const r of records) {
+    for (const r of viewRecords) {
       let arr = byYear.get(r.year);
       if (!arr) {
         arr = [];
@@ -197,29 +327,33 @@ export default function Page() {
       .map(([year, recs]) => ({ year, records: recs }))
       .sort((a, b) => (yearsAsc ? a.year - b.year : b.year - a.year));
     return list;
-  }, [records, yearsAsc]);
+  }, [viewRecords, yearsAsc]);
 
   const idToIndex = useMemo(() => {
     const m = new Map<string, number>();
-    records.forEach((r, i) => m.set(r.id, i));
+    viewRecords.forEach((r, i) => m.set(r.id, i));
     return m;
-  }, [records]);
+  }, [viewRecords]);
 
   const stats = useMemo(() => {
-    const photos = records.filter((r) => r.kind === 'image').length;
-    const videos = records.length - photos;
-    const size = records.reduce((s, r) => s + r.size, 0);
-    const metaDated = records.filter((r) => r.dateSource !== 'fs').length;
+    const photos = viewRecords.filter((r) => r.kind === 'image').length;
+    const videos = viewRecords.length - photos;
+    const size = viewRecords.reduce((s, r) => s + r.size, 0);
+    const metaDated = viewRecords.filter((r) => r.dateSource !== 'fs').length;
     return {
       photos,
       videos,
       size,
       years: groups.length,
-      metaPct: records.length ? Math.round((metaDated / records.length) * 100) : 0,
+      total: viewRecords.length,
+      metaPct: viewRecords.length ? Math.round((metaDated / viewRecords.length) * 100) : 0,
       minYear: groups.length ? Math.min(...groups.map((g) => g.year)) : null,
       maxYear: groups.length ? Math.max(...groups.map((g) => g.year)) : null,
     };
-  }, [records, groups]);
+  }, [viewRecords, groups]);
+
+  const favCount = useMemo(() => records.reduce((n, r) => (favs.has(r.id) ? n + 1 : n), 0), [records, favs]);
+  const printCount = useMemo(() => records.reduce((n, r) => (prints.has(r.id) ? n + 1 : n), 0), [records, prints]);
 
   // scroll-spy for the year quick-nav
   useEffect(() => {
@@ -256,12 +390,17 @@ export default function Page() {
         folderName={folderName}
         hasResults={records.length > 0}
         yearsAsc={yearsAsc}
+        view={view}
+        favCount={favCount}
+        printCount={printCount}
+        onViewChange={setView}
         onPick={pickFolder}
         onDemo={loadDemo}
         onToggleSort={() => setYearsAsc((v) => !v)}
         onRescan={rescan}
         onResetCache={resetCache}
         onAbout={() => setAboutOpen(true)}
+        onPickPrintDir={() => void choosePrintDir()}
       />
 
       {phase === 'idle' && (
@@ -283,8 +422,33 @@ export default function Page() {
         />
       )}
 
-      {phase === 'ready' && records.length > 0 && (
+      {phase === 'ready' && viewRecords.length > 0 && (
         <>
+          {view === 'print' && (
+            <div className="viewbar glass">
+              <span className="chip">
+                <IconFolder size={14} />
+                {printDir ? describePrintDir(printDir) : 'Папка для печати не выбрана'}
+              </span>
+              <button className="btn" onClick={() => void choosePrintDir()}>
+                Выбрать папку
+              </button>
+              <button className="btn btn-primary" onClick={() => void saveAllForPrint()}>
+                <IconPrinter size={15} />
+                Сохранить всё в папку
+              </button>
+              <span className="viewbar-hint">правый клик по фото → «Сохранить для печати»</span>
+            </div>
+          )}
+          {view === 'fav' && (
+            <div className="viewbar glass">
+              <span className="chip">
+                <IconHeart size={14} filled />
+                Избранные фотографии ({favCount})
+              </span>
+              <span className="viewbar-hint">правый клик по фото → «В избранное», клавиша F в просмотрщике</span>
+            </div>
+          )}
           <div className="stats-bar glass">
             <span className="stat">
               <IconImage size={16} />
@@ -347,6 +511,9 @@ export default function Page() {
                 year={g.year}
                 records={g.records}
                 getFile={(id) => getFileRef.current!(id)}
+                favs={favs}
+                prints={prints}
+                onCellContext={(rec, e) => setCtxMenu({ x: e.clientX, y: e.clientY, rec })}
                 onOpen={(i) => {
                   const rec = g.records[i];
                   const idx = idToIndex.get(rec.id);
@@ -363,16 +530,36 @@ export default function Page() {
         </>
       )}
 
-      {phase === 'ready' && records.length === 0 && (
+      {phase === 'ready' && viewRecords.length === 0 && (
         <div className="empty-wrap" style={{ marginTop: '14vh' }}>
           <div className="empty-card glass" style={{ textAlign: 'center' }}>
-            <h1 className="empty-title">Медиафайлов не найдено</h1>
-            <p className="empty-sub">
-              В выбранной папке нет изображений или видео. Попробуйте другую папку.
-            </p>
+            {view === 'fav' ? (
+              <>
+                <h1 className="empty-title">В избранном пока пусто</h1>
+                <p className="empty-sub">
+                  Отметьте фотографии: правый клик по плитке → «В избранное», или клавиша F в
+                  просмотрщике.
+                </p>
+              </>
+            ) : view === 'print' ? (
+              <>
+                <h1 className="empty-title">Список печати пуст</h1>
+                <p className="empty-sub">
+                  Правый клик по фотографии → «Сохранить для печати» — файл скопируется в
+                  выбранную папку и появится здесь.
+                </p>
+              </>
+            ) : (
+              <>
+                <h1 className="empty-title">Медиафайлов не найдено</h1>
+                <p className="empty-sub">
+                  В выбранной папке нет изображений или видео. Попробуйте другую папку.
+                </p>
+              </>
+            )}
             <div className="empty-actions">
-              <button className="btn btn-primary" onClick={pickFolder}>
-                Выбрать другую папку
+              <button className="btn btn-primary" onClick={() => setView('all')}>
+                Вернуться ко всем фото
               </button>
               <button className="btn" onClick={loadDemo}>
                 Посмотреть демо
@@ -382,13 +569,59 @@ export default function Page() {
         </div>
       )}
 
-      {viewerIndex !== null && records[viewerIndex] && (
+      {viewerIndex !== null && viewRecords[viewerIndex] && (
         <Lightbox
-          records={records}
+          records={viewRecords}
           index={viewerIndex}
           getFile={(id) => getFileRef.current!(id)}
           onClose={() => setViewerIndex(null)}
           onIndexChange={setViewerIndex}
+          fav={favs.has(viewRecords[viewerIndex].id)}
+          printed={prints.has(viewRecords[viewerIndex].id)}
+          onToggleFav={() => toggleFav(viewRecords[viewerIndex])}
+          onTogglePrint={() => togglePrint(viewRecords[viewerIndex])}
+        />
+      )}
+
+      {ctxMenu && (
+        <ContextMenu
+          x={ctxMenu.x}
+          y={ctxMenu.y}
+          onClose={() => setCtxMenu(null)}
+          items={[
+            {
+              label: 'Открыть',
+              icon: <IconImage size={17} />,
+              onClick: () => {
+                const idx = idToIndex.get(ctxMenu.rec.id);
+                if (idx !== undefined) openViewer(idx);
+              },
+            },
+            {
+              label: favs.has(ctxMenu.rec.id) ? 'Убрать из избранного' : 'В избранное',
+              icon: <IconHeart size={17} filled={favs.has(ctxMenu.rec.id)} />,
+              onClick: () => toggleFav(ctxMenu.rec),
+            },
+            {
+              label: prints.has(ctxMenu.rec.id)
+                ? 'Убрать из печати'
+                : 'Сохранить для печати',
+              icon: <IconPrinter size={17} />,
+              onClick: () => {
+                if (prints.has(ctxMenu.rec.id)) {
+                  setPrints((prev) => {
+                    const next = new Set(prev);
+                    next.delete(ctxMenu.rec.id);
+                    void PRINT_STORE.save(next);
+                    return next;
+                  });
+                  showToast('Убрано из печати');
+                } else {
+                  void saveRecForPrint(ctxMenu.rec);
+                }
+              },
+            },
+          ]}
         />
       )}
 

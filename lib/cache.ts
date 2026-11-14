@@ -11,6 +11,7 @@ const KV_STORE = 'kv';
 const THUMBS_STORE = 'thumbs';
 
 interface CachedMeta {
+  v: 2;
   dateISO: string;
   dateSource: PhotoRecord['dateSource'];
   camera: string | null;
@@ -38,7 +39,7 @@ function openDb(): Promise<IDBDatabase | null> {
   });
 }
 
-function tx<T>(store: string, mode: IDBTransactionMode, run: (s: IDBObjectStore) => IDBRequest<T>): Promise<T | null> {
+export function tx<T>(store: string, mode: IDBTransactionMode, run: (s: IDBObjectStore) => IDBRequest<T>): Promise<T | null> {
   return openDb().then(
     (db) =>
       new Promise<T | null>((resolve) => {
@@ -61,8 +62,9 @@ export async function loadMetaCache(): Promise<Map<string, CachedMeta>> {
   const map = new Map<string, CachedMeta>();
   if (keys && vals) {
     for (let i = 0; i < keys.length; i++) {
-      const v = vals[i];
-      if (v && typeof v.dateISO === 'string') map.set(String(keys[i]), v);
+      const v = vals[i] as CachedMeta | undefined;
+      // ignore v1 entries written before name-hint dating existed
+      if (v && typeof v.dateISO === 'string' && v.v === 2) map.set(String(keys[i]), v);
     }
   }
   return map;

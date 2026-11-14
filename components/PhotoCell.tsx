@@ -3,13 +3,16 @@
 import { useEffect, useState } from 'react';
 import { ensureThumb, peekThumb } from '@/lib/thumbs';
 import { formatDateShort } from '@/lib/formats';
-import { IconImage, IconPlay } from './icons';
+import { IconHeart, IconImage, IconPlay, IconPrinter } from './icons';
 import type { PhotoRecord, ThumbInfo } from '@/lib/types';
 
 interface Props {
   rec: PhotoRecord;
   getFile: (id: string) => Promise<File>;
   onOpen: () => void;
+  fav: boolean;
+  printed: boolean;
+  onContext: (e: React.MouseEvent) => void;
 }
 
 function hueFor(ext: string): number {
@@ -24,7 +27,7 @@ function hueFor(ext: string): number {
  * into view, so the ensureThumb() call here effectively fires for visible
  * photos only — no IntersectionObserver needed.
  */
-export default function PhotoCell({ rec, getFile, onOpen }: Props) {
+export default function PhotoCell({ rec, getFile, onOpen, fav, printed, onContext }: Props) {
   const [thumb, setThumb] = useState<ThumbInfo | null>(peekThumb(rec.id));
   const [failed, setFailed] = useState(false);
   const [broken, setBroken] = useState(false);
@@ -49,6 +52,10 @@ export default function PhotoCell({ rec, getFile, onOpen }: Props) {
     <button
       className="vcell"
       onClick={onOpen}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onContext(e);
+      }}
       title={rec.name}
       aria-label={`${rec.name}, ${formatDateShort(rec.dateISO)}`}
     >
@@ -77,6 +84,21 @@ export default function PhotoCell({ rec, getFile, onOpen }: Props) {
           draggable={false}
           onError={() => setBroken(true)}
         />
+      )}
+
+      {(fav || printed) && (
+        <div className="cell-marks">
+          {fav && (
+            <span className="mark fav" title="В избранном">
+              <IconHeart size={12} filled />
+            </span>
+          )}
+          {printed && (
+            <span className="mark print" title="Выбрано для печати">
+              <IconPrinter size={12} />
+            </span>
+          )}
+        </div>
       )}
 
       <div className="card-sheen" />

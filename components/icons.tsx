@@ -132,3 +132,21 @@ export const IconTrash = (p: IconProps) => (
     <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m3 0-1 13a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1L6 7" />
   </Svg>
 );
+
+export const IconHeart = ({ filled, ...p }: IconProps & { filled?: boolean }) => (
+  <Svg {...p}>
+    <path
+      d="M12 20.5s-7.5-4.7-9.3-9.3C1.3 7.6 3.6 4.5 6.9 4.5c2 0 3.6 1.1 4.4 2.7l.7 1.3.7-1.3c.8-1.6 2.4-2.7 4.4-2.7 3.3 0 5.6 3.1 4.2 6.7-1.8 4.6-9.3 9.3-9.3 9.3z"
+      fill={filled ? 'currentColor' : 'none'}
+    />
+  </Svg>
+);
+
+export const IconPrinter = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M7 8V4h10v4" />
+    <rect x="4" y="8" width="16" height="9" rx="2" />
+    <path d="M7 14h10v6H7z" />
+    <circle cx="17" cy="11" r="0.6" fill="currentColor" stroke="none" />
+  </Svg>
+);

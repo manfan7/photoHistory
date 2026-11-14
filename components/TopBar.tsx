@@ -3,37 +3,51 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   IconFolder,
+  IconHeart,
   IconImage,
   IconInfo,
   IconMore,
+  IconPrinter,
   IconRefresh,
   IconSort,
   IconSparkle,
   IconTrash,
 } from './icons';
 
+export type ViewMode = 'all' | 'fav' | 'print';
+
 interface Props {
   folderName: string | null;
   hasResults: boolean;
   yearsAsc: boolean;
+  view: ViewMode;
+  favCount: number;
+  printCount: number;
+  onViewChange: (v: ViewMode) => void;
   onPick: () => void;
   onDemo: () => void;
   onToggleSort: () => void;
   onRescan: () => void;
   onResetCache: () => void;
   onAbout: () => void;
+  onPickPrintDir: () => void;
 }
 
 export default function TopBar({
   folderName,
   hasResults,
   yearsAsc,
+  view,
+  favCount,
+  printCount,
+  onViewChange,
   onPick,
   onDemo,
   onToggleSort,
   onRescan,
   onResetCache,
   onAbout,
+  onPickPrintDir,
 }: Props) {
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -69,6 +83,42 @@ export default function TopBar({
       )}
 
       <div className="topbar-spacer" />
+
+      {hasResults && (
+        <div className="viewtabs" role="tablist">
+          <button
+            className={view === 'all' ? 'active' : ''}
+            onClick={() => onViewChange('all')}
+            role="tab"
+            aria-selected={view === 'all'}
+          >
+            <IconImage size={15} />
+            <span className="vt-label">Все</span>
+          </button>
+          <button
+            className={view === 'fav' ? 'active' : ''}
+            onClick={() => onViewChange('fav')}
+            role="tab"
+            aria-selected={view === 'fav'}
+          >
+            <IconHeart size={15} filled={view === 'fav'} />
+            <span className="vt-label">Избранное</span>
+            {favCount > 0 && <span className="vt-count">{favCount}</span>}
+          </button>
+          <button
+            className={view === 'print' ? 'active' : ''}
+            onClick={() => onViewChange('print')}
+            role="tab"
+            aria-selected={view === 'print'}
+          >
+            <IconPrinter size={15} />
+            <span className="vt-label">Печать</span>
+            {printCount > 0 && <span className="vt-count">{printCount}</span>}
+          </button>
+        </div>
+      )}
+
+      {hasResults && <div className="topbar-spacer" />}
 
       <button className="btn btn-primary" onClick={onPick}>
         <IconFolder size={16} />
@@ -106,6 +156,10 @@ export default function TopBar({
               <IconSort size={17} />
               <span className="mi-label">Годы</span>
               <span className="mi-hint">{yearsAsc ? 'сверху старые' : 'сверху новые'}</span>
+            </button>
+            <button className="menu-item" onClick={act(onPickPrintDir)}>
+              <IconPrinter size={17} />
+              <span className="mi-label">Папка для печати…</span>
             </button>
             <button className="menu-item" onClick={act(onResetCache)}>
               <IconTrash size={17} />
