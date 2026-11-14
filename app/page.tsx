@@ -17,7 +17,8 @@ import {
   IconSparkle,
   IconVideo,
 } from '@/components/icons';
-import { scanDirectoryHandle, scanFileList, type ScanCallbacks } from '@/lib/scanner';
+import { scanDirectoryHandle, scanFileList, scanTauriFolder, type ScanCallbacks } from '@/lib/scanner';
+import { startThumbPreloader, onPreloadProgress } from '@/lib/preloader';
 import { humanSize, plural } from '@/lib/formats';
 import { clearMetaCache, getSavedHandle, saveHandle } from '@/lib/cache';
 import { FAV_STORE, LAST_DIR_PATH_STORE, PRINT_DIR_STORE, PRINT_STORE } from '@/lib/favorites';
@@ -29,7 +30,6 @@ import {
   tauriPickArchiveFolder,
   type PrintDirRef,
 } from '@/lib/desktop';
-import { scanTauriFolder } from '@/lib/scanner';
 import { getWasm } from '@/lib/wasm';
 import type { PhotoRecord, ScanState } from '@/lib/types';
 
@@ -60,6 +60,7 @@ export default function Page() {
   const [prints, setPrints] = useState<Set<string>>(new Set());
   const [printDir, setPrintDir] = useState<PrintDirRef | null>(null);
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; rec: PhotoRecord } | null>(null);
+  const [preload, setPreload] = useState<{ done: number; total: number } | null>(null);
 
   const getFileRef = useRef<((id: string) => Promise<File>) | null>(null);
   const lastSourceRef = useRef<FileSystemDirectoryHandle | File[] | { tauriDir: string } | null>(null);
@@ -95,6 +96,10 @@ export default function Page() {
     if (inputRef.current) {
       (inputRef.current as unknown as { webkitdirectory: boolean }).webkitdirectory = true;
     }
+    const unsubPreload = onPreloadProgress((p) => setPreload(p));
+    return () => {
+      unsubPreload();
+    };
     // debug hooks for automated testing (?debug=1)
     if (typeof window !== 'undefined' && window.location.search.includes('debug=1')) {
       (window as unknown as Record<string, unknown>).__phDebug = {
@@ -132,6 +137,9 @@ export default function Page() {
         setRecords(result.records);
         setSkippedCount(result.skipped);
         setThumbEpoch((e) => e + 1);
+        // mobile-gallery pattern: pre-generate thumbs for the whole archive in
+        // the background so scrolling becomes pure cache hits
+        startThumbPreloader(result.records, result.getFile);
         if (cancelledRef.current && result.records.length > 0) {
           showToast('Анализ прерван — показаны уже обработанные файлы');
         }
@@ -677,6 +685,19 @@ export default function Page() {
       )}
 
       {toast && <div className="toast glass glass-strong">{toast}</div>}
+
+      {preload && preload.done < preload.total && preload.total > 0 && (
+        <div className="thumb-progress glass">
+          <span className="tp-icon">⚡</span>
+          <span className="tp-label">Прогрев превью</span>
+          <span className="tp-bar">
+            <i style={{ width: `${Math.round((preload.done / preload.total) * 100)}%` }} />
+          </span>
+          <span className="tp-num">
+            {preload.done}/{preload.total}
+          </span>
+        </div>
+      )}
 
       <input
         ref={inputRef}

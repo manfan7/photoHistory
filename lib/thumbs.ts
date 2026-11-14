@@ -7,7 +7,14 @@
 //      on the main thread; exotic formats fall back to EXIF previews
 
 import { getThumb, metaKey, putThumbBatch, type StoredThumb } from './cache';
-import { b64ToBlob, isTauri, tauriAssetUrl, tauriGenThumbs, withTimeout } from './desktop';
+import {
+  b64ToBlob,
+  isTauri,
+  tauriAssetUrl,
+  tauriGenThumbs,
+  tauriGetEmbeddedPreview,
+  withTimeout,
+} from './desktop';
 import { heicToJpeg, isHeicExt } from './heic';
 import { extractThumbnail } from './wasm';
 import type { PhotoRecord, ThumbInfo } from './types';
@@ -357,7 +364,8 @@ async function flushTauriBatch(): Promise<void> {
       const blob = b64ToBlob(t.jpegB64, 'image/jpeg');
       const entry: Entry = { url: URL.createObjectURL(blob), w: t.w, h: t.h };
       lruSet(b.rec.id, entry);
-      queueIdbPut(b.rec, { b: blob, w: t.w, h: t.h });
+      queueIdbPut(b.rec, { b: blob, w: t.w, h: t.h, full: true });
+      notifyThumbUpgrade(b.rec.id);
       b.resolve(entry);
     } else {
       b.resolve(null); // image-rs can't decode it — caller falls back to JS
@@ -365,11 +373,82 @@ async function flushTauriBatch(): Promise<void> {
   });
 }
 
+// thumb upgrade pub/sub — background preloader replaces low-res paints with
+// full thumbs and subscribed cells re-render
+const upgradeListeners = new Map<string, Set<() => void>>();
+
+export function onThumbUpgrade(id: string, cb: () => void): () => void {
+  let set = upgradeListeners.get(id);
+  if (!set) {
+    set = new Set();
+    upgradeListeners.set(id, set);
+  }
+  set.add(cb);
+  return () => {
+    set?.delete(cb);
+    if (set && set.size === 0) upgradeListeners.delete(id);
+  };
+}
+
+export function notifyThumbUpgrade(id: string): void {
+  upgradeListeners.get(id)?.forEach((cb) => cb());
+}
+
+const pendingNotify = new Set<string>();
+let notifyTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Batched async notify — avoids sync re-render churn per thumb. */
+export function notifyUpgradeListenersSoon(id: string): void {
+  pendingNotify.add(id);
+  if (notifyTimer === null) {
+    notifyTimer = setTimeout(() => {
+      notifyTimer = null;
+      for (const id2 of pendingNotify) notifyThumbUpgrade(id2);
+      pendingNotify.clear();
+    }, 60);
+  }
+}
+
+/** True while visible-cell requests are in flight — background work yields. */
+export function foregroundPending(): boolean {
+  return tauriBatch.length > 0 || pending.size > 0;
+}
+
 async function generate(rec: PhotoRecord, getFile: (id: string) => Promise<File>): Promise<Entry | null> {
   try {
-    // Tauri mode: native rayon thumbnails straight from disk, batched —
-    // measured ~5-30x faster than the browser decode pipeline
+    // 1) persisted thumb (IndexedDB) — warm sessions paint instantly
+    const stored = await getThumb(metaKey(rec));
+    if (stored) {
+      const entry: Entry = { url: URL.createObjectURL(stored.b), w: stored.w, h: stored.h };
+      lruSet(rec.id, entry);
+      if (stored.full !== false) return entry;
+      // low-res paint now; the background preloader upgrades it soon
+      notifyUpgradeListenersSoon(rec.id);
+      return entry;
+    }
+
+    // 2) Tauri native: instant first paint from the embedded EXIF preview
+    //    (decoded from the file head only), then the rayon full thumb
     if (isTauri() && rec.absPath) {
+      if (rec.hasEmbeddedThumb) {
+        try {
+          const t = await withTimeout(
+            tauriGetEmbeddedPreview(rec.absPath, MAX_EDGE),
+            8000,
+            'embedded_preview',
+          );
+          if (t && t.jpegB64) {
+            const blob = b64ToBlob(t.jpegB64, 'image/jpeg');
+            const entry: Entry = { url: URL.createObjectURL(blob), w: t.w, h: t.h };
+            lruSet(rec.id, entry);
+            queueIdbPut(rec, { b: blob, w: t.w, h: t.h, full: false });
+            notifyUpgradeListenersSoon(rec.id);
+            return entry;
+          }
+        } catch {
+          /* no usable embedded preview — go for the full decode */
+        }
+      }
       const native = await tauriBatchRequest(rec);
       if (native) return native;
       // image-rs can't decode it (HEIC/RAW) — fall through to the JS paths
@@ -413,7 +492,8 @@ async function generate(rec: PhotoRecord, getFile: (id: string) => Promise<File>
 
     const entry: Entry = { url: URL.createObjectURL(out.blob), w: out.w, h: out.h };
     lruSet(rec.id, entry);
-    if (!noStoreIds.has(rec.id)) queueIdbPut(rec, { b: out.blob, w: out.w, h: out.h });
+    if (!noStoreIds.has(rec.id)) queueIdbPut(rec, { b: out.blob, w: out.w, h: out.h, full: true });
+    notifyThumbUpgrade(rec.id);
     return entry;
   } catch {
     failedIds.add(rec.id);

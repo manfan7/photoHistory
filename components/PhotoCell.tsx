@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { ensureThumb, peekThumb } from '@/lib/thumbs';
+import { ensureThumb, onThumbUpgrade, peekThumb } from '@/lib/thumbs';
 import { formatDateShort } from '@/lib/formats';
 import { IconHeart, IconImage, IconPlay, IconPrinter } from './icons';
 import type { PhotoRecord, ThumbInfo } from '@/lib/types';
@@ -39,8 +39,15 @@ export default function PhotoCell({ rec, getFile, onOpen, fav, printed, onContex
       if (t) setThumb(t);
       else setFailed(true);
     });
+    // low-res first paint upgrades to the full thumb when the background
+    // preloader (or a foreground request) replaces it
+    const unsub = onThumbUpgrade(rec.id, () => {
+      const t = peekThumb(rec.id);
+      if (t) setThumb(t);
+    });
     return () => {
       alive = false;
+      unsub();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rec.id]);

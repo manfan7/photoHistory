@@ -226,6 +226,7 @@ pub struct Analyzed {
     date_taken: Option<String>,
     camera: Option<String>,
     thumb_len: usize,
+    orientation: u32,
 }
 
 /// EXIF + QuickTime container dating for one file, mirroring the JS
@@ -262,6 +263,7 @@ fn analyze_one_real(path: &Path, ext: &str) -> Option<Analyzed> {
     let mut date: Option<String> = None;
     let mut camera: Option<String> = None;
     let mut thumb_len: usize = 0;
+    let mut orientation: u32 = 1;
 
     let mut parsed = |bytes: &[u8]| -> Option<photo_history_wasm::MediaMeta> {
         match photo_history_wasm::exif_meta(bytes) {
@@ -271,6 +273,7 @@ fn analyze_one_real(path: &Path, ext: &str) -> Option<Analyzed> {
                     date_taken: Some(d),
                     camera: None,
                     thumb_len: 0,
+                    orientation: 1,
                 }
             }),
             _ => None,
@@ -282,6 +285,7 @@ fn analyze_one_real(path: &Path, ext: &str) -> Option<Analyzed> {
             date = m.date_taken;
             camera = m.camera;
             thumb_len = m.thumb_len;
+            orientation = m.orientation;
         }
     }
     if date.is_none() && size > HEAD {
@@ -293,6 +297,9 @@ fn analyze_one_real(path: &Path, ext: &str) -> Option<Analyzed> {
                     date = m.date_taken;
                     camera = m.camera.or(camera);
                     thumb_len = if m.thumb_len > 0 { m.thumb_len } else { thumb_len };
+                    if m.orientation > 1 {
+                        orientation = m.orientation;
+                    }
                 }
             }
         } else if container_cap {
@@ -311,6 +318,7 @@ fn analyze_one_real(path: &Path, ext: &str) -> Option<Analyzed> {
         date_taken: date,
         camera,
         thumb_len,
+        orientation,
     })
 }
 
@@ -336,8 +344,34 @@ pub struct ThumbOut {
     h: u32,
 }
 
+fn apply_exif_orientation(img: image::DynamicImage, orientation: u32) -> image::DynamicImage {
+    match orientation {
+        2 => img.fliph(),
+        3 => img.rotate180(),
+        4 => img.flipv(),
+        5 => img.rotate90().fliph(),
+        6 => img.rotate90(),
+        7 => img.rotate270().fliph(),
+        8 => img.rotate270(),
+        _ => img,
+    }
+}
+
+fn read_head(path: &Path, len: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut head = Vec::new();
+    f.take(len).read_to_end(&mut head).ok()?;
+    Some(head)
+}
+
 fn gen_thumb_one(path: &Path, max_edge: u32) -> Option<ThumbOut> {
     let img = image::open(path).ok()?;
+    let orientation = read_head(path, 2 * 1024 * 1024)
+        .and_then(|head| photo_history_wasm::exif_meta(&head))
+        .map(|m| m.orientation)
+        .unwrap_or(1);
+    let img = apply_exif_orientation(img, orientation);
     let (w0, h0) = (img.width(), img.height());
     let scale = 1.0f64.min(max_edge as f64 / w0.max(h0) as f64);
     let w = ((w0 as f64 * scale).round() as u32).max(1);
@@ -358,6 +392,36 @@ fn gen_thumb_one(path: &Path, max_edge: u32) -> Option<ThumbOut> {
         w,
         h,
     })
+}
+
+/// Instant first paint: the EXIF embedded preview, decoded from the file head
+/// only (no full-image decode). Returns downscaled JPEG ≤ max_edge.
+fn get_embedded_preview_impl(path: &Path, max_edge: u32) -> Option<ThumbOut> {
+    let head = read_head(path, 2 * 1024 * 1024)?;
+    let preview = photo_history_wasm::embedded_preview_bytes(&head)?;
+    let img = image::load_from_memory(&preview).ok()?;
+    let (w0, h0) = (img.width(), img.height());
+    let scale = 1.0f64.min(max_edge as f64 / w0.max(h0) as f64);
+    let w = ((w0 as f64 * scale).round() as u32).max(1);
+    let h = ((h0 as f64 * scale).round() as u32).max(1);
+    let thumb = if w == w0 && h == h0 {
+        img
+    } else {
+        img.thumbnail(w, h)
+    };
+    let mut jpeg = Vec::with_capacity(32 * 1024);
+    let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 76);
+    thumb.to_rgb8().write_with_encoder(enc).ok()?;
+    Some(ThumbOut {
+        jpeg_b64: base64::engine::general_purpose::STANDARD.encode(jpeg),
+        w,
+        h,
+    })
+}
+
+#[tauri::command]
+fn get_embedded_preview(path: String, max_edge: u32) -> Option<ThumbOut> {
+    get_embedded_preview_impl(Path::new(&path), max_edge)
 }
 
 /// Thumbnails for a batch of files — rayon parallel decode+resize.
@@ -387,6 +451,7 @@ fn main() {
             scan_folder,
             analyze_files,
             gen_thumbs,
+            get_embedded_preview,
             read_file_b64
         ])
         .run(tauri::generate_context!())

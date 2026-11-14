@@ -95,6 +95,8 @@ export interface StoredThumb {
   b: Blob;
   w: number;
   h: number;
+  /** false = fast low-res paint (embedded preview); a full thumb replaces it */
+  full?: boolean;
 }
 
 export async function getThumb(key: string): Promise<StoredThumb | null> {

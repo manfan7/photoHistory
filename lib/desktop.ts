@@ -53,6 +53,10 @@ export async function tauriGenThumbs(paths: string[], maxEdge: number): Promise<
   return tauriInvoke<(ThumbIpc | null)[]>('gen_thumbs', { paths, maxEdge });
 }
 
+export async function tauriGetEmbeddedPreview(path: string, maxEdge: number): Promise<ThumbIpc | null> {
+  return tauriInvoke<ThumbIpc | null>('get_embedded_preview', { path, maxEdge });
+}
+
 export async function tauriReadFileB64(path: string): Promise<string> {
   return tauriInvoke<string>('read_file_b64', { path });
 }

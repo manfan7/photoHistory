@@ -20,6 +20,8 @@ pub struct MediaMeta {
     pub camera: Option<String>,
     /// Byte length of the embedded JPEG preview (EXIF thumbnail), if any
     pub thumb_len: usize,
+    /// EXIF orientation (1–8), applied by native thumbnail generation
+    pub orientation: u32,
 }
 
 #[wasm_bindgen]
@@ -108,11 +110,34 @@ pub fn exif_meta(data: &[u8]) -> Option<MediaMeta> {
         }
     }
 
+    // display orientation (portrait photos need rotation in native thumbs)
+    if let Some(o) = uint_field(&exif, Tag::Orientation, In::PRIMARY) {
+        if (1..=8).contains(&o) {
+            meta.orientation = o;
+        }
+    }
+
     if meta.date_taken.is_none() && meta.camera.is_none() && meta.thumb_len == 0 {
         None
     } else {
         Some(meta)
     }
+}
+
+/// Extract the embedded JPEG preview from raw bytes (plain function — usable
+/// from both the WASM bindings and the native Tauri build).
+pub fn embedded_preview_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
+    let exif = exif::Reader::new()
+        .read_from_container(&mut Cursor::new(bytes))
+        .ok()?;
+    let tiff = exif.buf();
+    let off = uint_field(&exif, Tag::JPEGInterchangeFormat, In::THUMBNAIL)?;
+    let len = uint_field(&exif, Tag::JPEGInterchangeFormatLength, In::THUMBNAIL)?;
+    let (off, len) = (off as usize, len as usize);
+    if len < 128 || off.checked_add(len)? > tiff.len() {
+        return None;
+    }
+    Some(tiff[off..off + len].to_vec())
 }
 
 fn ascii_of(field: &exif::Field) -> Option<String> {
