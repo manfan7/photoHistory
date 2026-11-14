@@ -28,22 +28,41 @@ export default function PhotoCard({ rec, getFile, onOpen }: Props) {
     const el = ref.current;
     if (!el) return;
     let alive = true;
+    let started = false;
+
+    const load = () => {
+      if (started || !alive) return;
+      started = true;
+      ensureThumb(rec, getFile).then((t) => {
+        if (!alive) return;
+        if (t) setThumb(t);
+        else setFailed(true);
+      });
+    };
+
     const io = new IntersectionObserver(
       (entries) => {
         if (entries[0]?.isIntersecting) {
           io.disconnect();
-          ensureThumb(rec, getFile).then((t) => {
-            if (!alive) return;
-            if (t) setThumb(t);
-            else setFailed(true);
-          });
+          load();
         }
       },
       { rootMargin: '900px 0px' },
     );
     io.observe(el);
+
+    // Fallback for throttled rendering (occluded windows): IntersectionObserver
+    // callbacks never fire when the compositor pauses, so do a one-shot manual
+    // visibility check after a short delay.
+    const fallbackTimer = setTimeout(() => {
+      if (!alive || started) return;
+      const r = el.getBoundingClientRect();
+      if (r.top < window.innerHeight + 900 && r.bottom > -900) load();
+    }, 2500);
+
     return () => {
       alive = false;
+      clearTimeout(fallbackTimer);
       io.disconnect();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
