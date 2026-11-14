@@ -57,6 +57,30 @@ export async function tauriReadFileB64(path: string): Promise<string> {
   return tauriInvoke<string>('read_file_b64', { path });
 }
 
+/** WebView2 reads the file straight from disk via the asset protocol —
+ *  no base64 IPC copy, instant for full-view and videos. */
+export function tauriAssetUrl(path: string): string {
+  const t = (window as unknown as { __TAURI__?: TauriGlobal & { core: { convertFileSrc: (p: string, protocol?: string) => string } } }).__TAURI__;
+  if (!t) throw new Error('Tauri API недоступен');
+  return t.core.convertFileSrc(path, 'asset');
+}
+
+export function withTimeout<T>(p: Promise<T>, ms: number, tag = 'op'): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${tag} timeout`)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 export function b64ToBlob(b64: string, mime: string): Blob {
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);

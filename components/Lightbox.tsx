@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ensureThumb, peekThumb } from '@/lib/thumbs';
 import { heicToJpeg, isHeicExt } from '@/lib/heic';
+import { isTauri, tauriAssetUrl } from '@/lib/desktop';
 import { formatDateShort, humanSize } from '@/lib/formats';
 import {
   IconCamera,
@@ -58,7 +59,7 @@ export default function Lightbox({
   const rec = records[index];
   const [fullUrl, setFullUrl] = useState<string | null>(null);
   const [fullReady, setFullReady] = useState(false);
-  const [fallbackThumb, setFallbackThumb] = useState<ThumbInfo | null>(null);
+  const [lbThumb, setLbThumb] = useState<ThumbInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
   const decodedUrlRef = useRef<string | null>(null);
@@ -66,9 +67,9 @@ export default function Lightbox({
 
   // zoom / pan state; zoom=1 means "fit the screen" (object-fit: contain)
   const [view, setView] = useState<ViewState>({ zoom: 1, x: 0, y: 0 });
-  // handlers read this ref instead of the render-time view — gestures that
-  // happen in the same tick as a zoom (pinch chains, fast wheel+drag) must
-  // see the freshest zoom, not the one from the last committed render
+  // imperative viewport setter — the gesture ref is updated synchronously at
+  // call time (React updaters run lazily at render, which breaks same-tick
+  // gesture chains like wheel→drag or pinch steps)
   const viewRef = useRef<ViewState>({ zoom: 1, x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
   const stageRef = useRef<HTMLDivElement | null>(null);
@@ -76,8 +77,6 @@ export default function Lightbox({
   const dragRef = useRef<{ px: number; py: number; ox: number; oy: number } | null>(null);
   const pinchRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const pinchDistRef = useRef<number | null>(null);
-
-  const thumbUrl = rec ? peekThumb(rec.id)?.url ?? null : null;
 
   const older = useCallback(
     () => onIndexChange(Math.min(records.length - 1, index + 1)),
@@ -110,9 +109,7 @@ export default function Lightbox({
     return { x: Math.min(mx, Math.max(-mx, x)), y: Math.min(my, Math.max(-my, y)) };
   }, []);
 
-  // imperative viewport setter — the gesture ref is updated synchronously at
-  // call time (React updaters run lazily at render, which breaks same-tick
-  // gesture chains like wheel→drag or pinch steps)
+  // imperative viewport setter — syncs the gesture ref at call time
   const setViewState = useCallback((next: ViewState) => {
     viewRef.current = next;
     setView(next);
@@ -166,15 +163,6 @@ export default function Lightbox({
   }, [rec?.id, setViewState]);
 
   useEffect(() => {
-    const prev = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => {
-      document.body.style.overflow = prev;
-    };
-  }, []);
-
-  // wheel zoom (non-passive so we can preventDefault)
-  useEffect(() => {
     const el = stageRef.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
@@ -187,31 +175,48 @@ export default function Lightbox({
   }, [zoomAt, rec?.kind]);
 
   useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, []);
+
+  useEffect(() => {
     let alive = true;
     let objectUrl: string | null = null;
+    let objectUrlOwned = false;
     heicTriedRef.current = null;
     setFullUrl(null);
     setFullReady(false);
-    setFallbackThumb(null);
+    setLbThumb(null);
     setFailed(false);
     setLoading(true);
 
     (async () => {
       try {
+        // thumb first — it is cached or generates natively in milliseconds;
+        // the full-size original then loads on top of it
+        const thumb = peekThumb(rec.id) ?? (await ensureThumb(rec, getFile));
+        if (!alive) return;
+        setLbThumb(thumb);
+
         if (rec.renderable) {
-          // thumb (already in cache) renders instantly; the original decodes on top
-          const file = await getFile(rec.id);
-          if (!alive) return;
-          objectUrl = URL.createObjectURL(file);
-          setFullUrl(objectUrl);
-          setLoading(false);
-        } else {
-          const thumb = peekThumb(rec.id) ?? (await ensureThumb(rec, getFile));
-          if (!alive) return;
-          if (!thumb) {
-            setFailed(true);
+          if (isTauri() && rec.absPath) {
+            // asset protocol: WebView2 reads the file straight from disk —
+            // no base64 IPC copy, decodes as fast as the machine allows
+            setFullUrl(tauriAssetUrl(rec.absPath));
+            setLoading(false);
+          } else {
+            const file = await getFile(rec.id);
+            if (!alive) return;
+            objectUrl = URL.createObjectURL(file);
+            objectUrlOwned = true;
+            setFullUrl(objectUrl);
+            setLoading(false);
           }
-          setFallbackThumb(thumb);
+        } else {
+          if (!thumb) setFailed(true);
           setLoading(false);
         }
       } catch {
@@ -226,7 +231,7 @@ export default function Lightbox({
       alive = false;
       // Only revoke URLs created here; thumbnail URLs are shared with the
       // card grid and owned by the thumb cache.
-      if (objectUrl && rec.renderable) URL.revokeObjectURL(objectUrl);
+      if (objectUrl && objectUrlOwned) URL.revokeObjectURL(objectUrl);
       if (decodedUrlRef.current) {
         URL.revokeObjectURL(decodedUrlRef.current);
         decodedUrlRef.current = null;
@@ -259,6 +264,8 @@ export default function Lightbox({
   if (!rec) return null;
 
   const zoomable = rec.kind !== 'video';
+  const nativeFullUrl =
+    isTauri() && rec.absPath ? tauriAssetUrl(rec.absPath) : null;
 
   return (
     <div
@@ -330,7 +337,7 @@ export default function Lightbox({
           setDragging(false);
         }}
       >
-        {loading && !thumbUrl && !fallbackThumb && <div className="lb-spinner" />}
+        {loading && !lbThumb && <div className="lb-spinner" />}
 
         {failed ? (
           <div className="about-card glass glass-strong" style={{ textAlign: 'center', margin: 0 }}>
@@ -344,8 +351,8 @@ export default function Lightbox({
           </div>
         ) : rec.renderable ? (
           <>
-            {thumbUrl && !fullReady && (
-              <img className="lb-thumb" src={thumbUrl} alt="" draggable={false} />
+            {lbThumb && !fullReady && (
+              <img className="lb-thumb" src={lbThumb.url} alt="" draggable={false} />
             )}
             {fullUrl &&
               (rec.kind === 'video' ? (
@@ -374,14 +381,8 @@ export default function Lightbox({
                 />
               ))}
           </>
-        ) : fallbackThumb ? (
-          <img
-            className="lb-img ready"
-            src={fallbackThumb.url}
-            alt={rec.name}
-            draggable={false}
-            style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }}
-          />
+        ) : lbThumb ? (
+          <img className="lb-img ready" src={lbThumb.url} alt={rec.name} draggable={false} />
         ) : null}
 
         {zoomable && (

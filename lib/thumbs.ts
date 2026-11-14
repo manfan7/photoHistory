@@ -7,10 +7,11 @@
 //      on the main thread; exotic formats fall back to EXIF previews
 
 import { getThumb, metaKey, putThumbBatch, type StoredThumb } from './cache';
-import { b64ToBlob, isTauri, tauriGenThumbs } from './desktop';
+import { b64ToBlob, isTauri, tauriAssetUrl, tauriGenThumbs, withTimeout } from './desktop';
 import { heicToJpeg, isHeicExt } from './heic';
 import { extractThumbnail } from './wasm';
 import type { PhotoRecord, ThumbInfo } from './types';
+import type { ThumbIpc } from './desktop';
 
 const MAX_EDGE = 560; // cards are ~150px squares; 560 covers hi-DPI
 const JPEG_QUALITY = 0.78;
@@ -197,8 +198,14 @@ function isBlankFrame(
   }
 }
 
-async function videoThumb(file: File): Promise<{ blob: Blob; w: number; h: number } | null> {
-  const url = URL.createObjectURL(file);
+async function videoThumb(
+  file: File,
+  nativeUrl?: string,
+): Promise<{ blob: Blob; w: number; h: number } | null> {
+  // Tauri: stream straight from disk via the asset protocol — a 100 MB video
+  // no longer travels through base64 IPC just to grab a poster frame
+  const ownUrl = !nativeUrl;
+  const url = nativeUrl ?? URL.createObjectURL(file);
   const video = document.createElement('video');
   video.muted = true;
   video.playsInline = true;
@@ -237,7 +244,7 @@ async function videoThumb(file: File): Promise<{ blob: Blob; w: number; h: numbe
   } finally {
     video.removeAttribute('src');
     video.load();
-    URL.revokeObjectURL(url);
+    if (ownUrl) URL.revokeObjectURL(url);
   }
 }
 
@@ -300,29 +307,79 @@ export function ensureThumb(
   return p;
 }
 
+// ── Tauri native batch queue ────────────────────────────────────
+// Visible cells each request a thumb; instead of one IPC call per photo we
+// micro-batch (~50 ms window) so rayon decodes the whole visible area in a
+// single native call across all cores.
+
+interface BatchReq {
+  rec: PhotoRecord;
+  resolve: (e: Entry | null) => void;
+}
+
+const tauriBatch: BatchReq[] = [];
+let tauriTimer: ReturnType<typeof setTimeout> | null = null;
+
+function tauriBatchRequest(rec: PhotoRecord): Promise<Entry | null> {
+  return new Promise((resolve) => {
+    tauriBatch.push({ rec, resolve });
+    if (tauriTimer === null) {
+      tauriTimer = setTimeout(() => {
+        tauriTimer = null;
+        void flushTauriBatch();
+      }, 50);
+    }
+  });
+}
+
+async function flushTauriBatch(): Promise<void> {
+  const batch = tauriBatch.splice(0);
+  if (batch.length === 0) return;
+  const byId = new Map<string, BatchReq>();
+  for (const b of batch) if (!byId.has(b.rec.id)) byId.set(b.rec.id, b);
+  const reqs = [...byId.values()];
+  let results: (ThumbIpc | null)[] = [];
+  try {
+    results = await withTimeout(
+      tauriGenThumbs(
+        reqs.map((b) => b.rec.absPath as string),
+        MAX_EDGE,
+      ),
+      20000,
+      'gen_thumbs',
+    );
+  } catch {
+    results = [];
+  }
+  reqs.forEach((b, i) => {
+    const t = results[i];
+    if (t && t.jpegB64) {
+      const blob = b64ToBlob(t.jpegB64, 'image/jpeg');
+      const entry: Entry = { url: URL.createObjectURL(blob), w: t.w, h: t.h };
+      lruSet(b.rec.id, entry);
+      queueIdbPut(b.rec, { b: blob, w: t.w, h: t.h });
+      b.resolve(entry);
+    } else {
+      b.resolve(null); // image-rs can't decode it — caller falls back to JS
+    }
+  });
+}
+
 async function generate(rec: PhotoRecord, getFile: (id: string) => Promise<File>): Promise<Entry | null> {
   try {
-    // Tauri mode: native rayon thumbnail straight from the file on disk —
-    // several times faster than the browser decode path (measured: ~370 ms
-    // for a 24 MP photo natively vs ~2000 ms in the browser pipeline)
+    // Tauri mode: native rayon thumbnails straight from disk, batched —
+    // measured ~5-30x faster than the browser decode pipeline
     if (isTauri() && rec.absPath) {
-      const outs = await tauriGenThumbs([rec.absPath], MAX_EDGE);
-      const t = outs?.[0];
-      if (t && t.jpegB64) {
-        const blob = b64ToBlob(t.jpegB64, 'image/jpeg');
-        const entry: Entry = { url: URL.createObjectURL(blob), w: t.w, h: t.h };
-        lruSet(rec.id, entry);
-        queueIdbPut(rec, { b: blob, w: t.w, h: t.h });
-        return entry;
-      }
-      // image crate can't decode it (HEIC/RAW) — fall through to the JS paths
+      const native = await tauriBatchRequest(rec);
+      if (native) return native;
+      // image-rs can't decode it (HEIC/RAW) — fall through to the JS paths
     }
 
     const file = await getFile(rec.id);
     let out: { blob: Blob; w: number; h: number } | null = null;
 
     if (rec.kind === 'video') {
-      out = await videoThumb(file);
+      out = await videoThumb(file, isTauri() && rec.absPath ? tauriAssetUrl(rec.absPath) : undefined);
     } else if (file.type === 'image/svg+xml') {
       noStoreIds.add(rec.id);
       return { url: URL.createObjectURL(file), w: 4, h: 3 };
