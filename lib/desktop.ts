@@ -35,6 +35,8 @@ export interface ThumbIpc {
   jpegB64: string;
   w: number;
   h: number;
+  /** true = final tile quality (populated by the native disk-cache pipeline) */
+  full?: boolean;
 }
 
 export async function tauriPickArchiveFolder(): Promise<string | null> {
