@@ -342,6 +342,8 @@ pub struct ThumbOut {
     jpeg_b64: String,
     w: u32,
     h: u32,
+    /// true = final tile quality (preload batches are final either way)
+    full: bool,
 }
 
 fn apply_exif_orientation(img: image::DynamicImage, orientation: u32) -> image::DynamicImage {
@@ -365,33 +367,196 @@ fn read_head(path: &Path, len: u64) -> Option<Vec<u8>> {
     Some(head)
 }
 
-fn gen_thumb_one(path: &Path, max_edge: u32) -> Option<ThumbOut> {
-    let img = image::open(path).ok()?;
-    let orientation = read_head(path, 2 * 1024 * 1024)
-        .and_then(|head| photo_history_wasm::exif_meta(&head))
-        .map(|m| m.orientation)
-        .unwrap_or(1);
-    let img = apply_exif_orientation(img, orientation);
-    let (w0, h0) = (img.width(), img.height());
+/// Stable across runs (std's DefaultHasher is process-seeded, unusable for a
+/// persistent cache). FNV-1a 64.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// Pixel dimensions straight from the JPEG SOFn frame header — cache hits
+/// return without a decode, so dims must come from the cached bytes.
+fn jpeg_dims(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 4 || bytes[0] != 0xff || bytes[1] != 0xd8 {
+        return None;
+    }
+    let mut i = 2;
+    while i + 4 <= bytes.len() {
+        if bytes[i] != 0xff {
+            i += 1;
+            continue;
+        }
+        let marker = bytes[i + 1];
+        if marker == 0xff {
+            i += 1;
+            continue;
+        }
+        if marker == 0x01 || (0xd0..=0xd9).contains(&marker) {
+            i += 2;
+            continue;
+        }
+        let len = ((bytes[i + 2] as usize) << 8) | bytes[i + 3] as usize;
+        let is_sof = (0xc0..=0xcf).contains(&marker)
+            && marker != 0xc4
+            && marker != 0xc8
+            && marker != 0xcc;
+        if is_sof {
+            if i + 9 > bytes.len() {
+                return None;
+            }
+            let h = ((bytes[i + 5] as u32) << 8) | bytes[i + 6] as u32;
+            let w = ((bytes[i + 7] as u32) << 8) | bytes[i + 8] as u32;
+            return Some((w, h));
+        }
+        if len < 2 {
+            return None;
+        }
+        i += 2 + len;
+    }
+    None
+}
+
+/// Disk cache for generated thumbs (~750 MB for a 15K archive — acceptable
+/// for a local photo app). Keyed by path|size|mtime|max_edge: changing the
+/// file invalidates the entry. IO problems degrade silently to a miss.
+fn thumb_cache_dir() -> Option<PathBuf> {
+    let base = match std::env::var("LOCALAPPDATA") {
+        Ok(v) if !v.is_empty() => PathBuf::from(v),
+        _ => std::env::temp_dir(),
+    };
+    let dir = base.join("photoHistory").join("thumbs");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+fn thumb_cache_key(path: &Path, max_edge: u32) -> Option<String> {
+    let md = std::fs::metadata(path).ok()?;
+    let mtime_ms = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Some(format!(
+        "{}|{}|{}|{}",
+        path.to_string_lossy(),
+        md.len(),
+        mtime_ms,
+        max_edge
+    ))
+}
+
+fn thumb_cache_path(dir: &Path, key: &str) -> PathBuf {
+    dir.join(format!("{:016x}.jpg", fnv1a64(key.as_bytes())))
+}
+
+fn fit_dims(w0: u32, h0: u32, max_edge: u32) -> (u32, u32) {
     let scale = 1.0f64.min(max_edge as f64 / w0.max(h0) as f64);
-    let w = ((w0 as f64 * scale).round() as u32).max(1);
-    let h = ((h0 as f64 * scale).round() as u32).max(1);
-    let thumb = if w == w0 && h == h0 {
-        img
+    (
+        ((w0 as f64 * scale).round() as u32).max(1),
+        ((h0 as f64 * scale).round() as u32).max(1),
+    )
+}
+
+fn encode_thumb_jpeg(img: &image::DynamicImage, w: u32, h: u32, quality: u8) -> Option<Vec<u8>> {
+    let thumb = if w == img.width() && h == img.height() {
+        img.to_rgb8()
     } else {
-        img.thumbnail(w, h)
+        img.thumbnail(w, h).to_rgb8()
     };
     let mut jpeg = Vec::with_capacity(48 * 1024);
-    let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 78);
-    thumb
-        .to_rgb8()
-        .write_with_encoder(enc)
-        .ok()?;
+    let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, quality);
+    thumb.write_with_encoder(enc).ok()?;
+    Some(jpeg)
+}
+
+/// Embedded previews below this edge are not worth using as a tile's final
+/// quality — fall through to a full decode. 280 px covers a ~148 px tile up
+/// to DPR ~1.9 (desktop WebView2 runs at 125–150% scaling).
+const MIN_TILE_EDGE: u32 = 280;
+
+/// Decode path, no cache: embedded preview first (head-only read), full
+/// decode as the fallback. Contract: returned thumbs are final tile quality.
+fn gen_thumb_one_decode(path: &Path, max_edge: u32) -> Option<ThumbOut> {
+    let head = read_head(path, 2 * 1024 * 1024);
+    let orientation = head
+        .as_deref()
+        .and_then(|h| photo_history_wasm::exif_meta(h))
+        .map(|m| m.orientation)
+        .unwrap_or(1);
+
+    if let Some(preview) = head
+        .as_deref()
+        .and_then(|h| photo_history_wasm::embedded_preview_bytes(h))
+    {
+        if let Ok(img) = image::load_from_memory(&preview) {
+            let img = apply_exif_orientation(img, orientation);
+            let (w0, h0) = (img.width(), img.height());
+            if w0.max(h0) >= MIN_TILE_EDGE {
+                let (w, h) = fit_dims(w0, h0, max_edge);
+                if let Some(jpeg) = encode_thumb_jpeg(&img, w, h, 76) {
+                    return Some(ThumbOut {
+                        jpeg_b64: base64::engine::general_purpose::STANDARD.encode(jpeg),
+                        w,
+                        h,
+                        full: true,
+                    });
+                }
+            }
+        }
+    }
+
+    let img = image::open(path).ok()?;
+    let img = apply_exif_orientation(img, orientation);
+    let (w0, h0) = (img.width(), img.height());
+    let (w, h) = fit_dims(w0, h0, max_edge);
+    let jpeg = encode_thumb_jpeg(&img, w, h, 78)?;
     Some(ThumbOut {
         jpeg_b64: base64::engine::general_purpose::STANDARD.encode(jpeg),
         w,
         h,
+        full: true,
     })
+}
+
+fn gen_thumb_one_cached(path: &Path, max_edge: u32, cache_dir: Option<&Path>) -> Option<ThumbOut> {
+    let cp = match cache_dir {
+        Some(dir) => thumb_cache_key(path, max_edge).map(|key| thumb_cache_path(dir, &key)),
+        None => None,
+    };
+
+    if let Some(cp) = &cp {
+        if let Ok(bytes) = std::fs::read(cp) {
+            if bytes.len() > 128 && bytes.starts_with(&[0xff, 0xd8]) {
+                if let Some((w, h)) = jpeg_dims(&bytes) {
+                    return Some(ThumbOut {
+                        jpeg_b64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                        w,
+                        h,
+                        full: true,
+                    });
+                }
+            }
+        }
+    }
+
+    let out = gen_thumb_one_decode(path, max_edge)?;
+    if let Some(cp) = &cp {
+        if let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(&out.jpeg_b64) {
+            let _ = std::fs::write(cp, &raw);
+        }
+    }
+    Some(out)
+}
+
+/// Single-file decode path without cache — used by the decode benches.
+#[cfg_attr(not(test), allow(dead_code))]
+fn gen_thumb_one(path: &Path, max_edge: u32) -> Option<ThumbOut> {
+    gen_thumb_one_cached(path, max_edge, None)
 }
 
 /// Instant first paint: the EXIF embedded preview, decoded from the file head
@@ -416,6 +581,7 @@ fn get_embedded_preview_impl(path: &Path, max_edge: u32) -> Option<ThumbOut> {
         jpeg_b64: base64::engine::general_purpose::STANDARD.encode(jpeg),
         w,
         h,
+        full: false, // stage-1 fast paint — the preload/full thumb replaces it
     })
 }
 
@@ -424,13 +590,18 @@ fn get_embedded_preview(path: String, max_edge: u32) -> Option<ThumbOut> {
     get_embedded_preview_impl(Path::new(&path), max_edge)
 }
 
-/// Thumbnails for a batch of files — rayon parallel decode+resize.
-#[tauri::command]
-fn gen_thumbs_impl(paths: Vec<String>, max_edge: u32) -> Vec<Option<ThumbOut>> {
+/// Thumbnails for a batch of files — rayon parallel, embedded-first, disk-cached.
+fn gen_thumbs_bare(paths: &[String], max_edge: u32, cache_dir: Option<&Path>) -> Vec<Option<ThumbOut>> {
     paths
         .par_iter()
-        .map(|p| gen_thumb_one(Path::new(p), max_edge))
+        .map(|p| gen_thumb_one_cached(Path::new(p), max_edge, cache_dir))
         .collect()
+}
+
+#[tauri::command]
+fn gen_thumbs_impl(paths: Vec<String>, max_edge: u32) -> Vec<Option<ThumbOut>> {
+    let cache_dir = thumb_cache_dir();
+    gen_thumbs_bare(&paths, max_edge, cache_dir.as_deref())
 }
 
 #[tauri::command]
@@ -523,13 +694,61 @@ mod tests {
         if !jpg.is_file() {
             return;
         }
-        let t = gen_thumb_one(&jpg, 560).expect("thumb should succeed");
+        let cache = temp_dir("bounds");
+        let t = gen_thumb_one_cached(&jpg, 560, Some(&cache)).expect("thumb should succeed");
         assert!(t.w <= 560 && t.h <= 560);
+        assert!(t.full);
         let raw = base64::engine::general_purpose::STANDARD
             .decode(&t.jpeg_b64)
             .unwrap();
         assert!(raw.len() > 500);
         assert_eq!(&raw[..2], &[0xff, 0xd8]); // JPEG magic
+        std::fs::remove_dir_all(&cache).unwrap();
+    }
+
+    #[test]
+    fn thumb_cache_roundtrip_and_invalidation() {
+        let demo = demo_dir();
+        let jpg = demo.join("demo_2024_03_09_15.jpg");
+        if !jpg.is_file() {
+            return;
+        }
+        let cache = temp_dir("roundtrip");
+        let key = thumb_cache_key(&jpg, 560).expect("key");
+        let cp = thumb_cache_path(&cache, &key);
+
+        let first = gen_thumb_one_cached(&jpg, 560, Some(&cache)).expect("miss → decode");
+        assert!(cp.is_file(), "cache file written");
+        let raw = std::fs::read(&cp).unwrap();
+        assert_eq!(&raw[..2], &[0xff, 0xd8]);
+
+        // hit returns the cached payload with dims from the header, no decode
+        let second = gen_thumb_one_cached(&jpg, 560, Some(&cache)).expect("hit");
+        assert_eq!(first.jpeg_b64, second.jpeg_b64);
+        assert_eq!((first.w, first.h), (second.w, second.h));
+
+        // a different key (mtime/size/max_edge) must map to a different file
+        let other = thumb_cache_path(&cache, &format!("{key}x"));
+        assert_ne!(cp, other);
+        assert!(!other.is_file());
+        std::fs::remove_dir_all(&cache).unwrap();
+    }
+
+    #[test]
+    fn jpeg_dims_parses_own_output() {
+        let demo = demo_dir();
+        let jpg = demo.join("demo_2024_03_09_15.jpg");
+        if !jpg.is_file() {
+            return;
+        }
+        let cache = temp_dir("dims");
+        let t = gen_thumb_one_cached(&jpg, 560, Some(&cache)).expect("thumb");
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(&t.jpeg_b64)
+            .unwrap();
+        let (w, h) = jpeg_dims(&raw).expect("dims from SOFn");
+        assert_eq!((w, h), (t.w, t.h));
+        std::fs::remove_dir_all(&cache).unwrap();
     }
 
     #[test]
@@ -551,11 +770,24 @@ mod tests {
         let dated = res.iter().flatten().filter(|a| a.date_taken.is_some()).count();
         println!("bench analyze_files: {} files, {analyze_ms} ms, {dated} dated", paths.len());
 
+        // decode perf: no cache — otherwise the second run measures hits
         let t1 = std::time::Instant::now();
-        let thumbs = gen_thumbs_impl(paths.clone(), 560);
+        let thumbs = gen_thumbs_bare(&paths, 560, None);
         let thumb_ms = t1.elapsed().as_millis();
         let ok = thumbs.iter().flatten().count();
-        println!("bench gen_thumbs: {} thumbs, {thumb_ms} ms, {ok} ok", paths.len());
+        println!("bench gen_thumbs (decode): {} thumbs, {thumb_ms} ms, {ok} ok", paths.len());
+
+        // cache-hit perf: same batch through a warm cache dir
+        let cache = temp_dir("benchcache");
+        let _ = gen_thumbs_bare(&paths, 560, Some(&cache)); // warm
+        let t2 = std::time::Instant::now();
+        let hits = gen_thumbs_bare(&paths, 560, Some(&cache));
+        println!(
+            "bench gen_thumbs (cache hits): {} thumbs, {} ms",
+            hits.iter().flatten().count(),
+            t2.elapsed().as_millis()
+        );
+        std::fs::remove_dir_all(&cache).unwrap();
     }
 }
 
@@ -578,12 +810,12 @@ mod bench2 {
             .filter(|p| p.extension().map(|e| e == "jpg").unwrap_or(false))
             .collect();
         let paths: Vec<String> = jpgs.iter().map(|p| p.to_string_lossy().to_string()).collect();
-        // warm-up
-        let _ = gen_thumbs_impl(paths.clone(), 560);
+        // decode perf: no cache — the cache would turn the warm run into hits
+        let _ = gen_thumbs_bare(&paths, 560, None);
         let t0 = std::time::Instant::now();
-        let thumbs = gen_thumbs_impl(paths.clone(), 560);
+        let thumbs = gen_thumbs_bare(&paths, 560, None);
         println!(
-            "WARM gen_thumbs: {} thumbs in {} ms ({:.1} ms/thumb effective, {} cores)",
+            "WARM gen_thumbs (decode): {} thumbs in {} ms ({:.1} ms/thumb effective, {} cores)",
             thumbs.iter().flatten().count(),
             t0.elapsed().as_millis(),
             t0.elapsed().as_millis() as f64 / thumbs.iter().flatten().count() as f64,

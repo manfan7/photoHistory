@@ -378,7 +378,7 @@ async function flushTauriBatch(): Promise<void> {
         .then((blob) => {
           const entry: Entry = { url: URL.createObjectURL(blob), w: t.w, h: t.h };
           lruSet(b.rec.id, entry);
-          queueIdbPut(b.rec, { b: blob, w: t.w, h: t.h, full: true });
+          queueIdbPut(b.rec, { b: blob, w: t.w, h: t.h, full: t.full ?? true });
           notifyThumbUpgrade(b.rec.id);
           b.resolve(entry);
         })
