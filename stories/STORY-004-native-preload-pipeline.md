@@ -1,6 +1,6 @@
 # STORY-004: Native preload pipeline — embedded-first thumbs + disk cache
 
-Status: InReview
+Status: Done
 Priority: P1
 Epic: Preload scaling to 15K+ files
 

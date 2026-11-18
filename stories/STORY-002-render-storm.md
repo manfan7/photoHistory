@@ -1,6 +1,6 @@
 # STORY-002: Render storm fix — throttled preload progress, memoized grid
 
-Status: InReview
+Status: Done
 Priority: P1
 Epic: Preload scaling to 15K+ files
 

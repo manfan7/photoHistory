@@ -1,6 +1,6 @@
 # STORY-001: IndexedDB connection lifecycle + thumb index
 
-Status: InReview
+Status: Done
 Priority: P0 — fixes the user-reported freeze ("hangs after N preloaded photos")
 Epic: Preload scaling to 15K+ files (archive measured: 15,393 images + 144 videos)
 
