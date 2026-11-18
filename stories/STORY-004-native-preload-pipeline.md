@@ -1,6 +1,6 @@
 # STORY-004: Native preload pipeline — embedded-first thumbs + disk cache
 
-Status: Approved
+Status: InReview
 Priority: P1
 Epic: Preload scaling to 15K+ files
 
@@ -56,7 +56,10 @@ preloader can persist correct `full` semantics into IndexedDB.
      (embedded ≥280 or full decode), so `gen_thumbs` always reports
      `full=true`; the flag exists for future callers. Foreground `generate()`
      keeps its own two-stage flow via `get_embedded_preview` (unchanged).
-   - `ThumbOut { jpeg_b64, w, h, full }` — serde default for older callers.
+   - `ThumbOut { jpeg_b64, w, h, full }` — always serialized (single binary
+     ships Rust+TS together); TS consumers default via `t.full ?? true`.
+   - Cache writes: temp file + atomic rename so concurrent decodes of the same
+     path (preload chunk + foreground batch) never leave a torn cache file.
    - `gen_thumbs_impl` rayon-maps with the new signature.
    - Tests: temp-dir cache write→hit→no-decode roundtrip; mtime change → miss
      (new hash); embedded-first path returns within bounds; bench prints

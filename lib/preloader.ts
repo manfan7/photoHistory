@@ -33,7 +33,6 @@ const CHUNK = 24;
 const YIELD_MS = 60;
 
 let jobSeq = 0;
-let runningSeq = -1;
 let progress = { done: 0, total: 0 };
 const listeners = new Set<(p: { done: number; total: number }) => void>();
 
@@ -81,7 +80,6 @@ async function runJob(
   getFile: (id: string) => Promise<File>,
   seq: number,
 ): Promise<void> {
-  runningSeq = seq;
   const targets = records.filter((r) => r.kind === 'image' && !isHeicExt(r.ext));
   progress = { done: 0, total: targets.length };
   notify();
@@ -190,6 +188,7 @@ async function repairLegacyEntries(
     const upgradeRecs: PhotoRecord[] = [];
 
     for (const [key, r] of slice) {
+      if (seq !== jobSeq) return;
       const stored = await getThumb(key); // blob read — legacy keys only
       const full = stored ? stored.full !== false : true;
       indexEntries.push([key, { full }]);

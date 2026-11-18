@@ -52,8 +52,14 @@ function openDb(): Promise<IDBDatabase | null> {
       if (!db.objectStoreNames.contains(THUMB_INDEX_STORE)) db.createObjectStore(THUMB_INDEX_STORE);
     };
     req.onsuccess = () => {
-      settled = true;
       const db = req.result;
+      if (settled) {
+        // a timeout/blocked path already gave up on this open — close the
+        // late-arriving connection instead of leaking it for the page lifetime
+        db.close();
+        return;
+      }
+      settled = true;
       // a future version request must evict this connection cleanly
       db.onversionchange = () => {
         db.close();

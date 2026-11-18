@@ -547,7 +547,15 @@ fn gen_thumb_one_cached(path: &Path, max_edge: u32, cache_dir: Option<&Path>) ->
     let out = gen_thumb_one_decode(path, max_edge)?;
     if let Some(cp) = &cp {
         if let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(&out.jpeg_b64) {
-            let _ = std::fs::write(cp, &raw);
+            // write temp + rename: a background preload chunk and a foreground
+            // batch can decode the same path concurrently; rename keeps the
+            // cache file always a complete image (last writer wins atomically)
+            let tmp = cp.with_extension("jpg.tmp");
+            if std::fs::write(&tmp, &raw).is_ok() {
+                let _ = std::fs::rename(&tmp, cp);
+            } else {
+                let _ = std::fs::remove_file(&tmp);
+            }
         }
     }
     Some(out)

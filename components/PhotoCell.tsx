@@ -121,14 +121,12 @@ function PhotoCell({ rec, getFile, onOpen, fav, printed, onContext }: Props) {
 }
 
 /**
- * Ignore function props (onOpen/onContext/getFile) in the comparison: they are
- * inline closures re-created per parent render. Safe because `rec` identity
- * changes whenever the closures' inputs (records / index maps) change — a
- * skipped re-render can only happen when the old closures are still
- * semantically current. getFile is session-stable via useCallback anyway.
+ * Plain shallow memo. The parent re-renders cells only on real changes:
+ * scroll-window updates bail out of setRange when the range is unchanged, and
+ * unrelated Page renders (preload ticks, toasts) are blocked by the memoized
+ * YearSection. Function props (onOpen/onContext) MUST participate in the
+ * comparison — view switches rebuild idToIndex from the same record objects,
+ * so a comparator ignoring closures would leave mounted cells with a stale
+ * index and clicks would open the wrong photo.
  */
-function arePropsEqual(a: Props, b: Props): boolean {
-  return a.rec === b.rec && a.fav === b.fav && a.printed === b.printed && a.getFile === b.getFile;
-}
-
-export default memo(PhotoCell, arePropsEqual);
+export default memo(PhotoCell);

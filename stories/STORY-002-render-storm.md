@@ -1,6 +1,6 @@
 # STORY-002: Render storm fix — throttled preload progress, memoized grid
 
-Status: Approved
+Status: InReview
 Priority: P1
 Epic: Preload scaling to 15K+ files
 
@@ -37,12 +37,12 @@ state updates (memoized sections/cells, stable callback identities).
      session), passed to YearSection and Lightbox.
    - `onCellContext` wrapped in `useCallback` (deps: none — setState is stable).
 3. `components/YearSection.tsx`: wrap default export in `React.memo`.
-4. `components/PhotoCell.tsx`: wrap in `React.memo` with a custom comparator
-   ignoring function props (`onOpen`/`onContext`/`getFile` identities), keyed on
-   `rec` identity + `fav` + `printed`. Document the invariant that makes
-   ignoring closures safe: rec identity changes whenever the closure inputs
-   (idxById / records) change, so a skipped re-render can only happen when the
-   old closure is still semantically current.
+4. `components/PhotoCell.tsx`: wrap in plain `React.memo` (shallow). Function
+   props MUST participate in the comparison — view switches rebuild idToIndex
+   from the same record objects, so ignoring closure identity would leave
+   mounted cells with a stale index (review finding 1). Effectiveness comes
+   from the stable useCallback identities + memoized YearSection, not from
+   ignoring closures.
 
 ## Acceptance criteria
 
