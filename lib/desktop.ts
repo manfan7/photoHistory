@@ -87,16 +87,25 @@ export function withTimeout<T>(p: Promise<T>, ms: number, tag = 'op'): Promise<T
   });
 }
 
-export function b64ToBlob(b64: string, mime: string): Blob {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new Blob([bytes], { type: mime });
+export async function b64ToBlob(b64: string, mime: string): Promise<Blob> {
+  try {
+    // native decoder — the old per-byte charCodeAt loop burned ~2.4M
+    // iterations per 24-thumb chunk
+    const res = await fetch(`data:${mime};base64,${b64}`);
+    return await res.blob();
+  } catch {
+    // defensive fallback — data URLs should always decode
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+  }
 }
 
 export async function tauriReadFileAsFile(path: string, name: string, mime: string): Promise<File> {
   const b64 = await tauriReadFileB64(path);
-  return new File([b64ToBlob(b64, mime)], name, { type: mime });
+  const blob = await b64ToBlob(b64, mime);
+  return new File([blob], name, { type: mime });
 }
 
 function blobToBase64(blob: Blob): Promise<string> {

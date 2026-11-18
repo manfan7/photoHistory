@@ -106,6 +106,7 @@ async function runJob(
     const chunk = targets.slice(i, i + CHUNK);
     const tauriPaths: string[] = [];
     const tauriRecs: PhotoRecord[] = [];
+    const webRecs: PhotoRecord[] = [];
 
     for (const r of chunk) {
       const key = metaKey(r);
@@ -124,27 +125,41 @@ async function runJob(
         tauriPaths.push(r.absPath);
         tauriRecs.push(r);
       } else {
-        // web pipeline (workers) — decode + persist
-        const t = await ensureThumb(r, getFile);
-        if (t) progress.done++;
-        if (seq !== jobSeq) return;
+        webRecs.push(r);
       }
+    }
+
+    // web pipeline (workers): bounded parallel pool — serial per-record
+    // awaits starved the worker pool on big archives
+    if (webRecs.length > 0) {
+      const WEB_POOL = 6;
+      let next = 0;
+      const runOne = async (): Promise<void> => {
+        while (next < webRecs.length && seq === jobSeq) {
+          const r = webRecs[next++];
+          const t = await ensureThumb(r, getFile);
+          if (t) progress.done++;
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(WEB_POOL, webRecs.length) }, runOne));
+      if (seq !== jobSeq) return;
     }
 
     if (tauriPaths.length > 0) {
       try {
         const res = await tauriGenThumbs(tauriPaths, MAX_EDGE);
         const entries: [string, StoredThumb][] = [];
-        res.forEach((t, j) => {
+        for (let j = 0; j < res.length; j++) {
+          const t = res[j];
           const r = tauriRecs[j];
           if (t && t.jpegB64) {
-            const blob = b64ToBlob(t.jpegB64, 'image/jpeg');
+            const blob = await b64ToBlob(t.jpegB64, 'image/jpeg');
             entries.push([metaKey(r), { b: blob, w: t.w, h: t.h, full: t.full ?? true }]);
             index.set(metaKey(r), { full: t.full ?? true });
             notifyThumbUpgrade(r.id);
             progress.done++;
           }
-        });
+        }
         if (entries.length > 0) await putThumbBatch(entries);
       } catch {
         /* transient IPC failure — chunk is simply skipped */
@@ -191,14 +206,15 @@ async function repairLegacyEntries(
       try {
         const res = await tauriGenThumbs(upgradePaths, MAX_EDGE);
         const entries: [string, StoredThumb][] = [];
-        res.forEach((t, j) => {
+        for (let j = 0; j < res.length; j++) {
+          const t = res[j];
           const r = upgradeRecs[j];
           if (t && t.jpegB64) {
-            const blob = b64ToBlob(t.jpegB64, 'image/jpeg');
+            const blob = await b64ToBlob(t.jpegB64, 'image/jpeg');
             entries.push([metaKey(r), { b: blob, w: t.w, h: t.h, full: t.full ?? true }]);
             notifyThumbUpgrade(r.id);
           }
-        });
+        }
         if (entries.length > 0) await putThumbBatch(entries);
       } catch {
         /* transient IPC failure — remaining upgrades retry next session */

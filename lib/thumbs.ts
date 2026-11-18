@@ -65,6 +65,7 @@ type WorkerResult = { blob: Blob; w: number; h: number } | { error: string };
 
 const workers: Worker[] = [];
 const workerBusy: boolean[] = [];
+const workerCurrentTask: (number | null)[] = [];
 const workerWaiters = new Map<number, (r: WorkerResult) => void>();
 let workerTaskSeq = 0;
 const workerQueue: {
@@ -84,15 +85,26 @@ function initWorkers(): boolean {
         const waiter = workerWaiters.get(id);
         workerWaiters.delete(id);
         workerBusy[idx] = false;
+        workerCurrentTask[idx] = null;
         waiter?.(result as WorkerResult);
         dispatchWorkerTasks();
       };
       w.onerror = () => {
+        // resolve the waiter this worker was serving — an unresolved promise
+        // would wedge the cell forever and skew foregroundPending()
+        const id = workerCurrentTask[idx];
+        workerCurrentTask[idx] = null;
         workerBusy[idx] = false;
+        if (id !== null) {
+          const waiter = workerWaiters.get(id);
+          workerWaiters.delete(id);
+          waiter?.({ error: 'thumb worker crashed' });
+        }
         dispatchWorkerTasks();
       };
       workers.push(w);
       workerBusy.push(false);
+      workerCurrentTask.push(null);
     } catch {
       return false;
     }
@@ -107,6 +119,7 @@ function dispatchWorkerTasks() {
     if (!task) return;
     workerBusy[i] = true;
     const id = ++workerTaskSeq;
+    workerCurrentTask[i] = id;
     workerWaiters.set(id, task.resolve);
     workers[i].postMessage({ id, blob: task.blob, maxEdge: MAX_EDGE, quality: JPEG_QUALITY });
   }
@@ -361,12 +374,15 @@ async function flushTauriBatch(): Promise<void> {
   reqs.forEach((b, i) => {
     const t = results[i];
     if (t && t.jpegB64) {
-      const blob = b64ToBlob(t.jpegB64, 'image/jpeg');
-      const entry: Entry = { url: URL.createObjectURL(blob), w: t.w, h: t.h };
-      lruSet(b.rec.id, entry);
-      queueIdbPut(b.rec, { b: blob, w: t.w, h: t.h, full: true });
-      notifyThumbUpgrade(b.rec.id);
-      b.resolve(entry);
+      b64ToBlob(t.jpegB64, 'image/jpeg')
+        .then((blob) => {
+          const entry: Entry = { url: URL.createObjectURL(blob), w: t.w, h: t.h };
+          lruSet(b.rec.id, entry);
+          queueIdbPut(b.rec, { b: blob, w: t.w, h: t.h, full: true });
+          notifyThumbUpgrade(b.rec.id);
+          b.resolve(entry);
+        })
+        .catch(() => b.resolve(null));
     } else {
       b.resolve(null); // image-rs can't decode it — caller falls back to JS
     }
@@ -438,7 +454,7 @@ async function generate(rec: PhotoRecord, getFile: (id: string) => Promise<File>
             'embedded_preview',
           );
           if (t && t.jpegB64) {
-            const blob = b64ToBlob(t.jpegB64, 'image/jpeg');
+            const blob = await b64ToBlob(t.jpegB64, 'image/jpeg');
             const entry: Entry = { url: URL.createObjectURL(blob), w: t.w, h: t.h };
             lruSet(rec.id, entry);
             queueIdbPut(rec, { b: blob, w: t.w, h: t.h, full: false });
