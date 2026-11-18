@@ -9,3 +9,4 @@ Thumbs.db
 src-tauri/target/
 src-tauri/gen/schemas/
 public/demo/stress/
+verify/last-run.log
