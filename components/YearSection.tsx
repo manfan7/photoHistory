@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { MONTHS_FULL, MONTHS_SHORT, humanSize, plural } from '@/lib/formats';
 import PhotoCell from './PhotoCell';
 import type { PhotoRecord } from '@/lib/types';
@@ -9,7 +9,8 @@ interface Props {
   year: number;
   records: PhotoRecord[];
   getFile: (id: string) => Promise<File>;
-  onOpen: (index: number) => void;
+  /** receives the record directly — page maps it through its global index */
+  onOpen: (rec: PhotoRecord) => void;
   favs: Set<string>;
   prints: Set<string>;
   onCellContext: (rec: PhotoRecord, e: React.MouseEvent) => void;
@@ -154,12 +155,11 @@ function useRowWindow(ref: React.RefObject<HTMLDivElement | null>, rows: RowSpec
   return range;
 }
 
-export default function YearSection({ year, records, getFile, onOpen, favs, prints, onCellContext }: Props) {
+function YearSection({ year, records, getFile, onOpen, favs, prints, onCellContext }: Props) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const metrics = useGridMetrics(wrapRef);
   const { rows, total } = useMemo(() => buildRows(records, metrics), [records, metrics]);
   const [start, end] = useRowWindow(wrapRef, rows);
-  const idxById = useMemo(() => new Map(records.map((r, i) => [r.id, i] as const)), [records]);
 
   const photos = records.filter((r) => r.kind === 'image');
   const videos = records.length - photos.length;
@@ -237,10 +237,7 @@ export default function YearSection({ year, records, getFile, onOpen, favs, prin
                   fav={favs.has(rec.id)}
                   printed={prints.has(rec.id)}
                   onContext={(e) => onCellContext(rec, e)}
-                  onOpen={() => {
-                    const idx = idxById.get(rec.id);
-                    if (idx !== undefined) onOpen(idx);
-                  }}
+                  onOpen={() => onOpen(rec)}
                 />
               ))}
             </div>
@@ -250,3 +247,11 @@ export default function YearSection({ year, records, getFile, onOpen, favs, prin
     </section>
   );
 }
+
+/**
+ * Memoized: Page state updates (preload ticks, toasts) keep every prop
+ * referentially stable — records/getFile/favs/prints/callbacks only change
+ * when the underlying data changes — so an unrelated Page re-render costs
+ * nothing here.
+ */
+export default memo(YearSection);

@@ -67,6 +67,18 @@ export default function Page() {
   const cancelledRef = useRef(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // stable identities for the whole session — memoized sections/cells must
+  // never re-render from prop churn during preload progress ticks
+  const getFile = useCallback((id: string): Promise<File> => {
+    // set right after a scan completes; identical semantics to the previous
+    // inline `getFileRef.current!(id)`
+    return getFileRef.current!(id);
+  }, []);
+
+  const handleCellContext = useCallback((rec: PhotoRecord, e: React.MouseEvent) => {
+    setCtxMenu({ x: e.clientX, y: e.clientY, rec });
+  }, []);
+
   const showToast = useCallback((msg: string) => {
     setToast(msg);
     setTimeout(() => setToast((t) => (t === msg ? null : t)), 3200);
@@ -374,6 +386,16 @@ export default function Page() {
     return m;
   }, [viewRecords]);
 
+  const openViewer = (globalIndex: number) => setViewerIndex(globalIndex);
+
+  const handleOpenRecord = useCallback(
+    (rec: PhotoRecord) => {
+      const idx = idToIndex.get(rec.id);
+      if (idx !== undefined) openViewer(idx);
+    },
+    [idToIndex],
+  );
+
   const stats = useMemo(() => {
     const photos = viewRecords.filter((r) => r.kind === 'image').length;
     const videos = viewRecords.length - photos;
@@ -414,8 +436,6 @@ export default function Page() {
     // instant jump — smooth scrolling stalls in throttled webview states
     document.getElementById(`year-${year}`)?.scrollIntoView({ behavior: 'auto', block: 'start' });
   };
-
-  const openViewer = (globalIndex: number) => setViewerIndex(globalIndex);
 
   return (
     <main>
@@ -539,15 +559,11 @@ export default function Page() {
                 key={`${g.year}-${thumbEpoch}`}
                 year={g.year}
                 records={g.records}
-                getFile={(id) => getFileRef.current!(id)}
+                getFile={getFile}
                 favs={favs}
                 prints={prints}
-                onCellContext={(rec, e) => setCtxMenu({ x: e.clientX, y: e.clientY, rec })}
-                onOpen={(i) => {
-                  const rec = g.records[i];
-                  const idx = idToIndex.get(rec.id);
-                  if (idx !== undefined) openViewer(idx);
-                }}
+                onCellContext={handleCellContext}
+                onOpen={handleOpenRecord}
               />
             ))}
 
@@ -602,7 +618,7 @@ export default function Page() {
         <Lightbox
           records={viewRecords}
           index={viewerIndex}
-          getFile={(id) => getFileRef.current!(id)}
+          getFile={getFile}
           onClose={() => setViewerIndex(null)}
           onIndexChange={setViewerIndex}
           fav={favs.has(viewRecords[viewerIndex].id)}

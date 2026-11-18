@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import { ensureThumb, onThumbUpgrade, peekThumb } from '@/lib/thumbs';
 import { formatDateShort } from '@/lib/formats';
 import { IconHeart, IconImage, IconPlay, IconPrinter } from './icons';
@@ -27,7 +27,7 @@ function hueFor(ext: string): number {
  * into view, so the ensureThumb() call here effectively fires for visible
  * photos only — no IntersectionObserver needed.
  */
-export default function PhotoCell({ rec, getFile, onOpen, fav, printed, onContext }: Props) {
+function PhotoCell({ rec, getFile, onOpen, fav, printed, onContext }: Props) {
   const [thumb, setThumb] = useState<ThumbInfo | null>(peekThumb(rec.id));
   const [failed, setFailed] = useState(false);
   const [broken, setBroken] = useState(false);
@@ -119,3 +119,16 @@ export default function PhotoCell({ rec, getFile, onOpen, fav, printed, onContex
     </button>
   );
 }
+
+/**
+ * Ignore function props (onOpen/onContext/getFile) in the comparison: they are
+ * inline closures re-created per parent render. Safe because `rec` identity
+ * changes whenever the closures' inputs (records / index maps) change — a
+ * skipped re-render can only happen when the old closures are still
+ * semantically current. getFile is session-stable via useCallback anyway.
+ */
+function arePropsEqual(a: Props, b: Props): boolean {
+  return a.rec === b.rec && a.fav === b.fav && a.printed === b.printed && a.getFile === b.getFile;
+}
+
+export default memo(PhotoCell, arePropsEqual);

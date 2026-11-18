@@ -42,8 +42,28 @@ export function onPreloadProgress(cb: (p: { done: number; total: number }) => vo
   return () => listeners.delete(cb);
 }
 
-function notify(): void {
+// Progress ticks drive a top-level state update on Page; unthrottled they
+// re-rendered the whole tree ~26 times per 24-photo chunk. Cap at ~4/s with
+// a trailing edge so the final state always lands.
+const NOTIFY_MIN_INTERVAL = 250;
+let lastNotifyAt = 0;
+let trailingTimer: ReturnType<typeof setTimeout> | null = null;
+
+function notifyNow(): void {
+  if (trailingTimer) {
+    clearTimeout(trailingTimer);
+    trailingTimer = null;
+  }
+  lastNotifyAt = Date.now();
   listeners.forEach((cb) => cb({ ...progress }));
+}
+
+function notify(): void {
+  const since = Date.now() - lastNotifyAt;
+  if (since >= NOTIFY_MIN_INTERVAL) return notifyNow();
+  if (trailingTimer === null) {
+    trailingTimer = setTimeout(notifyNow, NOTIFY_MIN_INTERVAL - since);
+  }
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -135,6 +155,7 @@ async function runJob(
   }
 
   await repairLegacyEntries(repairQueue, seq);
+  notifyNow(); // guaranteed final state — hides the progress chip
 }
 
 /**
